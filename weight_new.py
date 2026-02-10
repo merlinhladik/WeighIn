@@ -1,50 +1,5 @@
 import cv2
 import numpy as np
-from collections import Counter
-import time
-import easyocr
-reader = easyocr.Reader(['en'], gpu=False)  # 'en' reicht für Ziffern
-
-import re
-
-def preprocess_for_ocr(view_bgr):
-    gray = cv2.cvtColor(view_bgr, cv2.COLOR_BGR2GRAY)
-
-    # Kontrast leicht anheben
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
-    # Otsu-Binarisierung (robust bei wechselnder Helligkeit)
-    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Falls Ziffern dunkel sind: invertieren. (Bei deinen Masken sind Ziffern weiß -> ok)
-    # th = 255 - th
-
-    # Kleine Löcher schließen (nicht zu aggressiv!)
-    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
-    return th
-
-def ocr_read_easyocr(view_bgr):
-    th = preprocess_for_ocr(view_bgr)
-
-    # EasyOCR erwartet RGB oder Graustufe; wir geben Graustufe/Binary
-    results = reader.readtext(th, detail=0, allowlist="0123456789:.")  # nur erlaubte Zeichen
-
-    if not results:
-        return None, th
-
-    # Oft kommen mehrere Strings -> zusammenfügen
-    text = "".join(results)
-
-    # Säubern: nur Ziffern, : und . behalten
-    text = re.sub(r"[^0-9:\.]", "", text)
-
-    # Plausibilitätscheck für Uhrzeit: z.B. "12:18"
-    if ":" in text and len(text) >= 4:
-        return text, th
-
-    # Oder einfach Ziffernstring zurück
-    return text if text else None, th
-
 
 # ---------- Kamera öffnen ----------
 cap = cv2.VideoCapture(0)  # ggf. 0/1/2
@@ -55,64 +10,8 @@ if not cap.isOpened():
     raise RuntimeError("Webcam konnte nicht geöffnet werden.")
 
 roi = None  # (x, y, w, h)
-warp_M = None           # Homography Matrix
-warp_size = (700, 240)  # (Breite, Höhe) der entzerrten Anzeige – kann so bleiben
-
-def select_4_points(image, title="4 Ecken klicken (TL, TR, BR, BL) - ESC=abbrechen"):
-    pts = []
-    img_show = image.copy()
-
-    def on_mouse(event, x, y, flags, param):
-        nonlocal img_show
-        if event == cv2.EVENT_LBUTTONDOWN:
-            pts.append((x, y))
-            cv2.circle(img_show, (x, y), 5, (0, 255, 0), -1)
-            cv2.putText(img_show, str(len(pts)), (x+8, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-
-    cv2.namedWindow(title)
-    cv2.setMouseCallback(title, on_mouse)
-
-    while True:
-        cv2.imshow(title, img_show)
-        key = cv2.waitKey(20) & 0xFF
-        if key == 27:  # ESC
-            cv2.destroyWindow(title)
-            return None
-        if len(pts) == 4:
-            cv2.destroyWindow(title)
-            return np.array(pts, dtype=np.float32)
-        
-
-def warp_display(frame, roi, M, out_size):
-    x, y, w, h = roi
-    crop = frame[y:y+h, x:x+w]
-    warped = cv2.warpPerspective(crop, M, out_size)
-    return warped
-
-
-def read_stable_value_ocr(cap, roi, samples=12, delay=0.04):
-    global warp_M, warp_size
-    vals = []
-    for _ in range(samples):
-        ok, frame = cap.read()
-        if not ok:
-            continue
-
-        if warp_M is not None:
-            view = warp_display(frame, roi, warp_M, warp_size)
-        else:
-            x, y, w, h = roi
-            view = frame[y:y+h, x:x+w]
-
-        txt, _ = ocr_read_easyocr(view)
-        if txt:
-            vals.append(txt)
-        time.sleep(delay)
-
-    if not vals:
-        return None
-    return Counter(vals).most_common(1)[0][0]
-
+digit_boxes_fixed = None  # Liste von 4 Boxes: [(x,y,w,h), ...] im ROI-Koordinatensystem
+DIG_W, DIG_H = 80, 140    # feste Digit-Normalisierung fürs Decoding
 
 
 def select_roi(frame):
@@ -135,14 +34,12 @@ def red_mask(bgr):
     m2 = cv2.inRange(hsv, lower2, upper2)
     mask = cv2.bitwise_or(m1, m2)
 
-    # Rauschen reduzieren / Segmente füllen (stärker, damit eine Ziffer 1 Kontur bleibt)
-    # Segmente stärker verbinden, damit z.B. "8" nicht in 2 Konturen zerfällt
-    kernel_close = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
-    # dilation nur wenn nötig:
-    # mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
-
-
+        # Rauschen reduzieren / Segmente füllen (stärker, damit eine Ziffer 1 Kontur bleibt)
+        # Segmente stärker verbinden, damit z.B. "8" nicht in 2 Konturen zerfällt
+    kernel_close = np.ones((7, 7), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+    # optional: leicht verdicken
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
 
     return mask
 
@@ -161,73 +58,129 @@ SEG2DIG = {
 }
 
 def decode_7seg_digit(bin_digit):
-    """
-    Robustere 7-Segment-Erkennung:
-    - dynamischer Threshold pro Ziffer
-    - Heuristik für sehr schmale "1"
-    - 0 vs 8: middle-segment muss deutlich "an" sein
-    """
+    # bin_digit muss schon ein Binary-Bild sein (0/255)
+    if bin_digit is None or bin_digit.size == 0:
+        return None
+
     h, w = bin_digit.shape[:2]
     if h < 20 or w < 10:
         return None
 
-    # leicht glätten, damit einzelne Pixel weniger stören
-    img = cv2.GaussianBlur(bin_digit, (3, 3), 0)
-
     # Rand weg
     pad_x = int(w * 0.08)
     pad_y = int(h * 0.08)
-    img = img[pad_y:h-pad_y, pad_x:w-pad_x]
+    img = bin_digit[pad_y:h-pad_y, pad_x:w-pad_x]
     if img.size == 0:
         return None
 
     h, w = img.shape[:2]
 
-    # Segment-Regionen (top, tl, tr, mid, bl, br, bottom)
     regions = [
         (0,           int(h*0.00), w,            int(h*0.20)),  # top
-        (0,           int(h*0.18), int(w*0.38),  int(h*0.52)),  # top-left
-        (int(w*0.62), int(h*0.18), w,            int(h*0.52)),  # top-right
-        (0,           int(h*0.40), w,            int(h*0.62)),  # middle
-        (0,           int(h*0.56), int(w*0.38),  int(h*0.95)),  # bottom-left
-        (int(w*0.62), int(h*0.56), w,            int(h*0.95)),  # bottom-right
+        (0,           int(h*0.15), int(w*0.35),  int(h*0.55)),  # tl
+        (int(w*0.65), int(h*0.15), w,            int(h*0.55)),  # tr
+        (0,           int(h*0.40), w,            int(h*0.62)),  # mid
+        (0,           int(h*0.55), int(w*0.35),  int(h*0.95)),  # bl
+        (int(w*0.65), int(h*0.55), w,            int(h*0.95)),  # br
         (0,           int(h*0.80), w,            h),            # bottom
     ]
 
-    fills = []
+    on = []
     for (x1, y1, x2, y2) in regions:
         seg = img[y1:y2, x1:x2]
         if seg.size == 0:
-            fills.append(0.0)
-        else:
-            fills.append(cv2.countNonZero(seg) / float(seg.size))
+            on.append(0)
+            continue
+        fill = cv2.countNonZero(seg) / float(seg.size)
 
-    maxf = max(fills)
-    minf = min(fills)
-    if maxf < 0.02:  # praktisch nichts da
-        return None
+        thr = 0.22  # globaler Grundwert (war 0.18)
+        # TR (Index 2) und BR (Index 5) etwas strenger, damit Reflexe nicht als "an" zählen
+        if len(on) in (2, 5):
+            thr = 0.26
+        elif len(on) == 3:
+            thr = 0.50
 
-    # dynamischer Threshold: passt sich Segmentdicke/Belichtung an
-    # (bei dicken Segmenten sind fills hoch, bei dünnen niedriger)
-    thr = min(0.30, max(0.10, (maxf + minf) / 2.0))
+        on.append(1 if fill > thr else 0)
 
-    on = [1 if f > thr else 0 for f in fills]
 
-    # Heuristik: sehr schmale Ziffer -> oft "1"
-    aspect = w / float(h)
-    if aspect < 0.35:
-        # wenn rechts deutlich "an", dann 1
-        if on[2] == 1 and on[5] == 1 and on[1] == 0 and on[4] == 0:
-            return 1
+    return SEG2DIG.get(tuple(on), None)
 
-    # 0 vs 8: middle muss wirklich klar an sein (sonst eher 0)
-    key = tuple(on)
-    if key == (1,1,1,1,1,1,1):  # 8
-        # wenn middle-fill nicht deutlich über thr liegt, eher 0
-        if fills[3] < thr * 1.35:
-            return 0
 
-    return SEG2DIG.get(key, None)
+def calibrate_fixed_boxes(crop_bgr, num_digits=4):
+    """
+    Klick num_digits mal auf die Ziffern (von links nach rechts).
+    Daraus wird eine feste Box-Größe abgeleitet.
+    """
+    pts = []
+    show = crop_bgr.copy()
+
+    def on_mouse(event, x, y, flags, param):
+        nonlocal show
+        if event == cv2.EVENT_LBUTTONDOWN:
+            pts.append((x, y))
+            cv2.circle(show, (x, y), 5, (0, 255, 0), -1)
+            cv2.putText(show, str(len(pts)), (x+8, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+
+    win = "Kalibrierung: auf 4 Ziffern klicken (links->rechts), ESC=abbrechen"
+    cv2.namedWindow(win)
+    cv2.setMouseCallback(win, on_mouse)
+
+    while True:
+        cv2.imshow(win, show)
+        k = cv2.waitKey(20) & 0xFF
+        if k == 27:  # ESC
+            cv2.destroyWindow(win)
+            return None
+        if len(pts) == num_digits:
+            cv2.destroyWindow(win)
+            break
+
+    # sortiere nach x (links->rechts)
+    pts = sorted(pts, key=lambda p: p[0])
+
+    # Box-Größe schätzen: Abstand zwischen Zentren
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+
+    # typische Digit-Breite ~ 0.75 * Abstand zwischen Zentren
+    if num_digits >= 2:
+        dx = np.median([xs[i+1]-xs[i] for i in range(num_digits-1)])
+    else:
+        dx = 60
+
+    box_w = int(max(30, dx * 0.85))
+    box_h = int(max(60, box_w * 1.7))  # 7-Segment eher hoch
+
+    boxes = []
+    for (cx, cy) in pts:
+        x1 = int(cx - box_w/2)
+        y1 = int(cy - box_h/2)
+        boxes.append((x1, y1, box_w, box_h))
+
+    return boxes
+
+
+def decode_from_fixed_boxes(mask, boxes):
+    digits = []
+    for (x, y, w, h) in boxes:
+        # Clip in Grenzen
+        x1 = max(0, x); y1 = max(0, y)
+        x2 = min(mask.shape[1], x + w)
+        y2 = min(mask.shape[0], y + h)
+
+        dimg = mask[y1:y2, x1:x2]
+        if dimg.size == 0:
+            digits.append(None)
+            continue
+
+        dimg = cv2.resize(dimg, (DIG_W, DIG_H), interpolation=cv2.INTER_NEAREST)
+        digits.append(decode_7seg_digit(dimg))
+
+    if any(d is None for d in digits):
+        return None, digits
+    if len(digits) == 4:
+        return f"{digits[0]}{digits[1]}:{digits[2]}{digits[3]}", digits
+    return "".join(str(d) for d in digits), digits
 
 
 def split_wide_box(mask, box):
@@ -420,35 +373,7 @@ while True:
     if key == ord('r'):
         roi = select_roi(frame)
 
-    elif key == ord('s'):
-        if roi is None:
-            print("Bitte zuerst ROI mit 'r' auswählen.")
-            continue
-
-        # 1) Stabilen OCR-Wert aus mehreren Frames holen
-        text = read_stable_value_ocr(cap, roi, samples=12, delay=0.04)
-        if text is None:
-            print("Konnte Zahl nicht stabil per OCR erkennen.")
-        else:
-            print("Stabil OCR erkannt:", text)
-
-        # 2) Debug-Bilder vom aktuellen Frame (entzerrt, falls verfügbar)
-        if warp_M is not None:
-            view = warp_display(frame, roi, warp_M, warp_size)
-        else:
-            x, y, w, h = roi
-            view = frame[y:y+h, x:x+w]
-
-        # OCR-Vorverarbeitung anzeigen
-        text_now, th = ocr_read_easyocr(view)  # liefert (text oder None, threshold-bild)
-        print("OCR aktuell:", text_now)
-
-        cv2.imshow("ocr_preprocess (ROI/warped)", th)
-        cv2.imshow("ocr_view (ROI/warped)", view)
-
-
-        
-    elif key == ord('p'):
+    elif key == ord('c'):
         if roi is None:
             print("Bitte zuerst ROI mit 'r' auswählen.")
             continue
@@ -456,18 +381,41 @@ while True:
         x, y, w, h = roi
         crop = frame[y:y+h, x:x+w]
 
-        pts = select_4_points(crop, "4 Ecken klicken (TL, TR, BR, BL) - ESC=abbrechen")
-        if pts is None:
-            print("Abgebrochen.")
+        boxes = calibrate_fixed_boxes(crop, num_digits=4)
+        if boxes is None:
+            print("Kalibrierung abgebrochen.")
+        else:
+            digit_boxes_fixed = boxes
+            print("Feste Digit-Boxes gesetzt:", digit_boxes_fixed)
+
+
+    elif key == ord('s'):
+        if roi is None:
+            print("Bitte zuerst ROI mit 'r' auswählen.")
             continue
 
-        # Zielrechteck (entzerrt)
-        W, H = warp_size
-        dst = np.array([[0,0], [W-1,0], [W-1,H-1], [0,H-1]], dtype=np.float32)
+        x, y, w, h = roi
+        crop = frame[y:y+h, x:x+w]
+        mask = red_mask(crop)
 
-        warp_M = cv2.getPerspectiveTransform(pts, dst)
-        print("Perspektive gesetzt (Homography berechnet).")
+        if digit_boxes_fixed is None:
+            print("Bitte zuerst mit 'c' kalibrieren (feste Boxen setzen).")
+            continue
 
+        text, digits = decode_from_fixed_boxes(mask, digit_boxes_fixed)
+
+
+        # Debug-Fenster (optional aber hilfreich)
+        dbg = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        for (bx, by, bw, bh) in digit_boxes_fixed:
+            cv2.rectangle(dbg, (bx, by), (bx+bw, by+bh), (0, 255, 0), 1)
+        cv2.imshow("mask (ROI)", mask)
+        cv2.imshow("debug (ROI)", dbg)
+
+        if text is None:
+            print("Konnte Zahl nicht sicher decodieren. (Tipp: ROI enger, Kamera ruhiger, ggf. Schwellwert anpassen)")
+        else:
+            print("Erkannt:", text)
 
     elif key == ord('q'):
         break
