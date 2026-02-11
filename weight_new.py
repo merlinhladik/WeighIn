@@ -4,7 +4,7 @@ import numpy as np
 # ---------- Kamera öffnen ----------
 cap = cv2.VideoCapture(0)  # ggf. 0/1/2
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # kann je nach Cam variieren
-cap.set(cv2.CAP_PROP_EXPOSURE, -6)         # ggf. -4 bis -10 testen
+cap.set(cv2.CAP_PROP_EXPOSURE, -10)         # ggf. -4 bis -10 testen
 
 if not cap.isOpened():
     raise RuntimeError("Webcam konnte nicht geöffnet werden.")
@@ -66,20 +66,15 @@ def decode_7seg_digit(bin_digit):
     if h < 20 or w < 10:
         return None
 
-    # Rand weg
-    pad_x = int(w * 0.08)
-    pad_y = int(h * 0.08)
-    img = bin_digit[pad_y:h-pad_y, pad_x:w-pad_x]
+    img = bin_digit
     if img.size == 0:
         return None
-
-    h, w = img.shape[:2]
 
     regions = [
         (0,           int(h*0.00), w,            int(h*0.20)),  # top
         (0,           int(h*0.15), int(w*0.35),  int(h*0.55)),  # tl
         (int(w*0.65), int(h*0.15), w,            int(h*0.55)),  # tr
-        (0,           int(h*0.40), w,            int(h*0.62)),  # mid
+        (int(w*0.15), int(h*0.40), int(w*0.85),  int(h*0.62)),  # mid
         (0,           int(h*0.55), int(w*0.35),  int(h*0.95)),  # bl
         (int(w*0.65), int(h*0.55), w,            int(h*0.95)),  # br
         (0,           int(h*0.80), w,            h),            # bottom
@@ -95,10 +90,7 @@ def decode_7seg_digit(bin_digit):
 
         thr = 0.22  # globaler Grundwert (war 0.18)
         # TR (Index 2) und BR (Index 5) etwas strenger, damit Reflexe nicht als "an" zählen
-        if len(on) in (2, 5):
-            thr = 0.26
-        elif len(on) == 3:
-            thr = 0.50
+    
 
         on.append(1 if fill > thr else 0)
 
@@ -405,17 +397,52 @@ while True:
         text, digits = decode_from_fixed_boxes(mask, digit_boxes_fixed)
 
 
-        # Debug-Fenster (optional aber hilfreich)
+        #Debug
         dbg = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
         for (bx, by, bw, bh) in digit_boxes_fixed:
+            # Digit-Box zeichnen
             cv2.rectangle(dbg, (bx, by), (bx+bw, by+bh), (0, 255, 0), 1)
+
+            # Segment-Regionen relativ zur Box berechnen
+            h = bh
+            w = bw
+
+            xL = int(w * 0.20)
+            xR = int(w * 0.80)
+
+            regions = [
+                (xL,          int(h*0.00), xR,           int(h*0.20)),  # top
+                (0,           int(h*0.15), int(w*0.35),  int(h*0.55)),  # tl
+                (int(w*0.65), int(h*0.15), w,            int(h*0.55)),  # tr
+                (xL,          int(h*0.40), xR,           int(h*0.62)),  # mid
+                (0,           int(h*0.55), int(w*0.35),  int(h*0.95)),  # bl
+                (int(w*0.65), int(h*0.55), w,            int(h*0.95)),  # br
+                (xL,          int(h*0.80), xR,           h),            # bottom
+    ]
+
+        # Jede Region einzeichnen
+            for (x1, y1, x2, y2) in regions:
+                cv2.rectangle(
+                dbg,
+                (bx + x1, by + y1),
+                (bx + x2, by + y2),
+                (255, 0, 0),  # Blau für Segmentregion
+                1
+                )
+
         cv2.imshow("mask (ROI)", mask)
         cv2.imshow("debug (ROI)", dbg)
 
+
         if text is None:
-            print("Konnte Zahl nicht sicher decodieren. (Tipp: ROI enger, Kamera ruhiger, ggf. Schwellwert anpassen)")
+            failed = [i for i, d in enumerate(digits) if d is None]
+            # 1-basiert ausgeben, damit es menschlicher ist
+            failed_human = [i+1 for i in failed]
+            print(f"Konnte nicht sicher decodieren. Fehler bei Ziffer(n): {failed_human} | digits={digits}")
         else:
             print("Erkannt:", text)
+
 
     elif key == ord('q'):
         break
