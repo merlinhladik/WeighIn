@@ -3,12 +3,15 @@ image: python:3.13
 stages:
  - build
  - test
+ - docs
 
 # For debugging
 before_script:
   - python --version
   - pip --version  
   - python -m pip install --upgrade pip
+  - apt-get update -y
+  - apt-get install -y doxygen
 
 build:
   stage: build
@@ -19,3 +22,12 @@ test:
   stage: test
   script:
     - echo "Test temporarily disabled"
+
+build_docs:
+  stage: docs
+  script:
+  - echo "Building Doxygen documentation..."
+  - doxygen Doxyfile
+  artifacts:
+    paths:
+      - html/
