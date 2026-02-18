@@ -12,6 +12,8 @@ import websockets
 import json
 
 URL = "ws://localhost:8765"
+VALID = 'VALID'
+NOT_VALID = 'NOT VALID'
 
 async def send_info(info):
     async with websockets.connect(URL) as websocket:
@@ -124,19 +126,19 @@ try:
 
                         
                         # Terminal: NUR VALID/NOT VALID
-                        print("VALID" if valid else "NOT VALID")
+                        print(VALID if valid else NOT_VALID)
 
                         # Overlay optional mit Namen
                         name = (info["first_name"] + " " + info["last_name"]).strip()
-                        overlay = f"{'VALID' if valid else 'NOT VALID'} {name}".strip()
+                        overlay = f"{VALID if valid else NOT_VALID} {name}".strip()
 
                     except Exception:
-                        print("NOT VALID")
-                        overlay = "NOT VALID"
+                        print(NOT_VALID)
+                        overlay = NOT_VALID
                 else:
                     # Nicht-Dokume-QR: ignorieren oder als NOT VALID werten (hier: ignorieren)
                     print("Inoffizieler")
-                    pass
+                    
 
             cv2.putText(
                 frame,

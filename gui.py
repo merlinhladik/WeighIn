@@ -14,6 +14,8 @@ try:
 except ImportError:
     websockets = None
 
+PAID = "Zahlung erfolgt"
+UNPAID = "Zahlung offen"
 
 JSON_FILE = "data.json"
 SETTINGS_FILE = "settings.json"
@@ -204,7 +206,7 @@ class WeighingApp(tk.Tk):
     def update_status_dropdown_colors(self, *args):
         """Updates dropdown backgrounds to reflect status selection."""
         valid_color = THEME["success"] if self.valid_var.get() == "gueltig" else THEME["error"]
-        paid_color = THEME["success"] if self.paid_var.get() == "Zahlung erfolgt" else THEME["error"]
+        paid_color = THEME["success"] if self.paid_var.get() == PAID else THEME["error"]
         gender_color = THEME["maennlich"] if self.gender_var.get() == "maennlich" else THEME["weiblich"]
 
         self.val_valid.config(bg=valid_color)
@@ -449,7 +451,7 @@ class WeighingApp(tk.Tk):
         is_male = gender_value == "maennlich"
 
         self.valid_var.set("gueltig" if is_valid else "ungueltig")
-        self.paid_var.set("Zahlung erfolgt" if is_paid else "Zahlung offen")
+        self.paid_var.set(PAID if is_paid else UNPAID)
         self.gender_var.set("maennlich" if is_male else "weiblich")
         self.update_status_dropdown_colors()
 
@@ -502,7 +504,7 @@ class WeighingApp(tk.Tk):
         p["Nachname"] = last_name
         p["Name"] = full_name
         is_valid = self.valid_var.get() == "gueltig"
-        is_paid = self.paid_var.get() == "Zahlung erfolgt"
+        is_paid = self.paid_var.get() == PAID
         p["Gueltigkeit"] = is_valid
         p["Gueltig"] = is_valid
         p["Valid"] = is_valid
@@ -920,7 +922,7 @@ class WeighingApp(tk.Tk):
             return
         msg = json.dumps(payload, ensure_ascii=False)
         stale = []
-        for client in list(self.ws_clients):
+        for client in self.ws_clients:
             try:
                 await client.send(msg)
             except Exception:
@@ -934,7 +936,7 @@ class WeighingApp(tk.Tk):
             return
 
         async def _shutdown():
-            for client in list(self.ws_clients):
+            for client in self.ws_clients:
                 try:
                     await client.close()
                 except Exception:
@@ -1024,7 +1026,6 @@ class WeighingApp(tk.Tk):
 
         # Row 3: Weight Entry and Age Display
         self.weight_var = self.create_entry_value(box_frame, 3, 0)
-        #self.weight_var = tk.StringVar()
         self.val_club = self.create_entry_value(box_frame, 3, 1)
 
 
@@ -1046,12 +1047,12 @@ class WeighingApp(tk.Tk):
         # Row 7: Status Values (Color-coded)
         # Adding extra bottom padding to prevent sticking to the box border
         self.valid_var = tk.StringVar(value="ungueltig")
-        self.paid_var = tk.StringVar(value="Zahlung offen")
+        self.paid_var = tk.StringVar(value=UNPAID)
         self.val_valid = self.create_status_dropdown(
             box_frame, self.valid_var, ["gueltig", "ungueltig"], 7, 0
         )
         self.val_paid = self.create_status_dropdown(
-            box_frame, self.paid_var, ["Zahlung erfolgt", "Zahlung offen"], 7, 1
+            box_frame, self.paid_var, [PAID, UNPAID], 7, 1
         )
         self.valid_var.trace_add("write", self.update_status_dropdown_colors)
         self.paid_var.trace_add("write", self.update_status_dropdown_colors)
