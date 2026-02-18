@@ -1,0 +1,20 @@
+{
+  "weight_decimal_places": 3,
+  "weight_tolerance": 0.0,
+  "tolerance_rules": [
+    {
+      "name": "Test",
+      "sex": "all",
+      "min_year": null,
+      "max_year": null,
+      "tol": 0.5
+    },
+    {
+      "name": "TEST",
+      "sex": "all",
+      "min_year": null,
+      "max_year": null,
+      "tol": 0.1
+    }
+  ]
+}
