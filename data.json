@@ -8,8 +8,9 @@
     "Verein": "JC Berlin",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": true
+    "Geschlecht": "maennlich",
+    "Bezahlt": true,
+    "Geburtsdatum": ""
   },
   {
     "ID": 2,
@@ -21,7 +22,8 @@
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
     "Geschlecht": "weiblich",
-    "Bezahlt": true
+    "Bezahlt": true,
+    "Geburtsdatum": ""
   },
   {
     "ID": 3,
@@ -32,8 +34,9 @@
     "Verein": null,
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": false
+    "Geschlecht": "maennlich",
+    "Bezahlt": false,
+    "Geburtsdatum": ""
   },
   {
     "ID": 4,
@@ -45,7 +48,8 @@
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
     "Geschlecht": "weiblich",
-    "Bezahlt": true
+    "Bezahlt": true,
+    "Geburtsdatum": ""
   },
   {
     "ID": 5,
@@ -56,8 +60,9 @@
     "Verein": "PSV Köln",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": true
+    "Geschlecht": "maennlich",
+    "Bezahlt": true,
+    "Geburtsdatum": ""
   },
   {
     "ID": 6,
@@ -69,7 +74,8 @@
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
     "Geschlecht": "weiblich",
-    "Bezahlt": false
+    "Bezahlt": false,
+    "Geburtsdatum": ""
   },
   {
     "ID": 7,
@@ -80,8 +86,9 @@
     "Verein": "JC Stuttgart",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": true
+    "Geschlecht": "maennlich",
+    "Bezahlt": true,
+    "Geburtsdatum": ""
   },
   {
     "ID": 8,
@@ -90,14 +97,11 @@
     "Name": "Sophie Schwarz",
     "Geburtsjahr": null,
     "Verein": "TSV Leipzig",
-    "Gewicht (kg)": 0.0,
+    "Gewicht (kg)": 2.0,
     "Gueltigkeit": false,
     "Geschlecht": "weiblich",
     "Bezahlt": true,
-    "Gewicht": 0.0,
-    "Gueltig": false,
-    "Valid": false,
-    "Paid": true
+    "Geburtsdatum": "---"
   },
   {
     "ID": 9,
@@ -108,8 +112,9 @@
     "Verein": null,
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": false
+    "Geschlecht": "maennlich",
+    "Bezahlt": false,
+    "Geburtsdatum": ""
   },
   {
     "ID": 10,
@@ -121,7 +126,8 @@
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
     "Geschlecht": "weiblich",
-    "Bezahlt": true
+    "Bezahlt": true,
+    "Geburtsdatum": ""
   },
   {
     "ID": 11,
@@ -134,11 +140,6 @@
     "Gueltigkeit": false,
     "Geschlecht": "maennlich",
     "Bezahlt": true,
-    "Gewicht": 20.0,
-    "Gueltig": false,
-    "Valid": false,
-    "Paid": true,
-    "Birthdate": "---",
     "Geburtsdatum": "---"
   },
   {
@@ -152,11 +153,6 @@
     "Gueltigkeit": false,
     "Geschlecht": "weiblich",
     "Bezahlt": true,
-    "Gewicht": 100.0,
-    "Gueltig": false,
-    "Valid": false,
-    "Paid": true,
-    "Birthdate": "---",
     "Geburtsdatum": "---"
   },
   {
@@ -168,8 +164,9 @@
     "Verein": "JC Potsdam",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": false
+    "Geschlecht": "maennlich",
+    "Bezahlt": false,
+    "Geburtsdatum": ""
   },
   {
     "ID": 14,
@@ -181,7 +178,8 @@
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
     "Geschlecht": "weiblich",
-    "Bezahlt": true
+    "Bezahlt": true,
+    "Geburtsdatum": ""
   },
   {
     "ID": 15,
@@ -192,13 +190,8 @@
     "Verein": "JC Nürnberg",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": true,
-    "Gewicht": 0.0,
-    "Gueltig": false,
-    "Valid": false,
-    "Paid": true,
-    "Birthdate": "---",
+    "Geschlecht": "maennlich",
+    "Bezahlt": false,
     "Geburtsdatum": "---"
   },
   {
@@ -210,8 +203,9 @@
     "Verein": "C",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": true,
-    "Geschlecht": "männlich",
-    "Bezahlt": false
+    "Geschlecht": "maennlich",
+    "Bezahlt": false,
+    "Geburtsdatum": ""
   },
   {
     "ID": 17,
@@ -222,8 +216,9 @@
     "Verein": "a",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": false
+    "Geschlecht": "maennlich",
+    "Bezahlt": false,
+    "Geburtsdatum": ""
   },
   {
     "ID": 18,
@@ -234,8 +229,9 @@
     "Verein": "c",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": false
+    "Geschlecht": "maennlich",
+    "Bezahlt": false,
+    "Geburtsdatum": ""
   },
   {
     "ID": 19,
@@ -246,26 +242,22 @@
     "Verein": "cccc",
     "Gewicht (kg)": 0.0,
     "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": false
+    "Geschlecht": "maennlich",
+    "Bezahlt": false,
+    "Geburtsdatum": ""
   },
   {
     "ID": 20,
     "Vorname": "al",
     "Nachname": "la",
     "Name": "al la",
-    "Geburtsjahr": 2020,
-    "Geburtsdatum": "01.01.2020",
-    "Birthdate": "01.01.2020",
+    "Geburtsjahr": 2000,
+    "Geburtsdatum": "01.01.2000",
     "Verein": "al",
     "Gewicht (kg)": 0.0,
-    "Gueltigkeit": false,
-    "Geschlecht": "männlich",
-    "Bezahlt": false,
-    "Gewicht": 0.0,
-    "Gueltig": false,
-    "Valid": false,
-    "Paid": false
+    "Gueltigkeit": true,
+    "Geschlecht": "maennlich",
+    "Bezahlt": true
   },
   {
     "ID": 21,
@@ -274,16 +266,11 @@
     "Name": "Merlin Hladik",
     "Geburtsjahr": 1998,
     "Geburtsdatum": "11.06.1998",
-    "Birthdate": "11.06.1998",
     "Verein": "Deidesheim",
-    "Gewicht (kg)": 0.0,
-    "Gueltigkeit": true,
-    "Geschlecht": "männlich",
-    "Bezahlt": true,
-    "Gewicht": 0.0,
-    "Gueltig": true,
-    "Valid": true,
-    "Paid": true
+    "Gewicht (kg)": 24.4,
+    "Gueltigkeit": false,
+    "Geschlecht": "maennlich",
+    "Bezahlt": false
   },
   {
     "ID": 22,
@@ -292,15 +279,23 @@
     "Name": "Merlin Hladik",
     "Geburtsjahr": 2010,
     "Geburtsdatum": "10.10.2010",
-    "Birthdate": "10.10.2010",
     "Verein": "Bad Dürkheim",
     "Gewicht (kg)": 10.0,
-    "Gueltigkeit": true,
-    "Geschlecht": "männlich",
-    "Bezahlt": true,
-    "Gewicht": 10.0,
-    "Gueltig": true,
-    "Valid": true,
-    "Paid": true
+    "Gueltigkeit": false,
+    "Geschlecht": "maennlich",
+    "Bezahlt": false
+  },
+  {
+    "ID": 23,
+    "Vorname": "ÖÖ",
+    "Nachname": "ÄÄ",
+    "Name": "ÖÖ ÄÄ",
+    "Geburtsjahr": 2000,
+    "Geburtsdatum": "20.02.2000",
+    "Verein": "ÜÜ",
+    "Gewicht (kg)": 0.0,
+    "Gueltigkeit": false,
+    "Geschlecht": "maennlich",
+    "Bezahlt": false
   }
 ]

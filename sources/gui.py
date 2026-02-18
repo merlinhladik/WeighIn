@@ -21,6 +21,11 @@ JSON_FILE = "../data.json"
 SETTINGS_FILE = "../settings.json"
 WS_HOST = "localhost"
 WS_PORT = 8765
+WEIGHT_KEY = "Gewicht (kg)"
+VALID_KEY = "Gueltigkeit"
+PAID_KEY = "Bezahlt"
+BIRTHDATE_KEY = "Geburtsdatum"
+TEXT_KEYS = ["Vorname", "Nachname", "Name", "Verein", "Geschlecht", BIRTHDATE_KEY]
 
 THEME = {
     "bg": "#121212",        # Background: Very dark grey
@@ -216,7 +221,7 @@ class WeighingApp(tk.Tk):
     @staticmethod
     def get_birthdate_text(p: Dict[str, Any]) -> str:
         """Returns a displayable birthdate string from mixed data formats."""
-        full_birthdate = p.get("Birthdate") or p.get("Geburtsdatum")
+        full_birthdate = p.get(BIRTHDATE_KEY)
         if full_birthdate:
             return str(full_birthdate)
 
@@ -374,12 +379,85 @@ class WeighingApp(tk.Tk):
              return
 
         try:
-            with open(JSON_FILE, "r", encoding="utf-8") as f:
+            with open(JSON_FILE, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
-            self.participants = data if isinstance(data, list) else data.get("participants", [])
+            raw_participants = data if isinstance(data, list) else data.get("participants", [])
+            normalized: List[Dict[str, Any]] = []
+            changed = False
+
+            for p in raw_participants:
+                if not isinstance(p, dict):
+                    continue
+                cleaned = self.normalize_participant(p)
+                normalized.append(cleaned)
+                if cleaned != p:
+                    changed = True
+
+            self.participants = normalized
+            if changed:
+                self.save_data()
             self.update_list(self.participants)
         except Exception as e:
             messagebox.showerror("Error", f"Could not load data: {e}")         
+
+    @staticmethod
+    def normalize_participant(p: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalizes participant schema to one canonical key per category."""
+        result = dict(p)
+
+        raw_weight = result.get(WEIGHT_KEY, result.get("Gewicht", 0.0))
+        try:
+            weight = float(raw_weight)
+        except (TypeError, ValueError):
+            weight = 0.0
+
+        is_valid = WeighingApp.to_bool(
+            result.get(VALID_KEY, result.get("Gueltig", result.get("Valid", False)))
+        )
+        is_paid = WeighingApp.to_bool(
+            result.get(PAID_KEY, result.get("Paid", False))
+        )
+        birthdate = result.get(BIRTHDATE_KEY, result.get("Birthdate", ""))
+        if birthdate is None:
+            birthdate = ""
+
+        for key in TEXT_KEYS:
+            result[key] = WeighingApp.fix_mojibake_text(result.get(key))
+
+        birthdate = result.get(BIRTHDATE_KEY, "")
+
+        result[WEIGHT_KEY] = weight
+        result[VALID_KEY] = is_valid
+        result[PAID_KEY] = is_paid
+        result[BIRTHDATE_KEY] = str(birthdate)
+
+        result.pop("Gewicht", None)
+        result.pop("Gueltig", None)
+        result.pop("Valid", None)
+        result.pop("Paid", None)
+        result.pop("Birthdate", None)
+
+        return result
+
+    @staticmethod
+    def fix_mojibake_text(value: Any) -> Any:
+        """Repairs common UTF-8/Latin-1 mojibake like 'MÃ¼ller' -> 'Müller'."""
+        if not isinstance(value, str):
+            return value
+
+        txt = value.strip()
+        if not txt:
+            return value
+
+        # Only attempt repair when suspicious marker chars are present.
+        if not any(marker in txt for marker in ["Ã", "â", "Â"]):
+            return value
+
+        try:
+            repaired = txt.encode("latin-1").decode("utf-8")
+            return repaired
+        except Exception:
+            return value
 
     def load_settings(self):
         """Loads app settings from JSON and applies safe defaults."""
@@ -396,7 +474,7 @@ class WeighingApp(tk.Tk):
         value = settings.get("weight_decimal_places")
         if isinstance(value, str) and value.isdigit():
             value = int(value)
-        if isinstance(value, int) and value in [1, 2, 3]:
+        if isinstance(value, int) and value in [0, 1, 2, 3]:
             self.weight_decimal_places = value
 
     def save_settings(self):
@@ -406,7 +484,7 @@ class WeighingApp(tk.Tk):
 
     def format_scale_weight(self, raw_weight: int) -> str:
         """Formats integer scale input based on configured decimal places."""
-        places = self.weight_decimal_places if self.weight_decimal_places in [1, 2, 3] else 1
+        places = self.weight_decimal_places if self.weight_decimal_places in [0, 1, 2, 3] else 1
         value = raw_weight / (10 ** places)
         return f"{value:.{places}f}"
 
@@ -444,8 +522,8 @@ class WeighingApp(tk.Tk):
         
         
 
-        is_valid = self.to_bool(p.get("Gueltigkeit", p.get("Gueltig", p.get("Valid", False))))
-        is_paid = self.to_bool(p.get("Bezahlt", p.get("Paid", False)))
+        is_valid = self.to_bool(p.get(VALID_KEY, False))
+        is_paid = self.to_bool(p.get(PAID_KEY, False))
         
         gender_value = str(p.get("Geschlecht") or "").strip().lower()
         is_male = gender_value == "maennlich"
@@ -455,7 +533,7 @@ class WeighingApp(tk.Tk):
         self.gender_var.set("maennlich" if is_male else "weiblich")
         self.update_status_dropdown_colors()
 
-        weight = 0.0
+        weight = p.get(WEIGHT_KEY, 0.0)
         self.weight_var.delete(0, tk.END)
         self.weight_var.insert(0, str(weight))
         # self.entry_weight.focus() # Auto-focus for immediate entry
@@ -498,23 +576,24 @@ class WeighingApp(tk.Tk):
         birthdate = self.val_birthdate.get().strip()
 
         p = self.selected_participant
-        p["Gewicht (kg)"] = weight
-        p["Gewicht"] = weight
+        p[WEIGHT_KEY] = weight
         p["Vorname"] = first_name
         p["Nachname"] = last_name
         p["Name"] = full_name
         is_valid = self.valid_var.get() == "gueltig"
         is_paid = self.paid_var.get() == PAID
-        p["Gueltigkeit"] = is_valid
-        p["Gueltig"] = is_valid
-        p["Valid"] = is_valid
-        p["Bezahlt"] = is_paid
-        p["Paid"] = is_paid
-        p["Birthdate"] = birthdate
-        p["Geburtsdatum"] = birthdate
+        p[VALID_KEY] = is_valid
+        p[PAID_KEY] = is_paid
+        p[BIRTHDATE_KEY] = birthdate
         parsed_year = self.get_birth_year_from_date(birthdate)
         if parsed_year is not None:
             p["Geburtsjahr"] = parsed_year
+
+        p.pop("Gewicht", None)
+        p.pop("Gueltig", None)
+        p.pop("Valid", None)
+        p.pop("Paid", None)
+        p.pop("Birthdate", None)
 
         try:
             self.save_data()
@@ -625,13 +704,12 @@ class WeighingApp(tk.Tk):
             "Nachname": last,
             "Name": f"{first} {last}",
             "Geburtsjahr": birth_year,
-            "Geburtsdatum": birthdate if birthdate else "",
-            "Birthdate": birthdate if birthdate else "",
+            BIRTHDATE_KEY: birthdate if birthdate else "",
             "Verein": club if club else None,
-            "Gewicht (kg)": 0.0,
-            "Gueltigkeit": False,
+            WEIGHT_KEY: 0.0,
+            VALID_KEY: False,
             "Geschlecht": gender,
-            "Bezahlt": False,
+            PAID_KEY: False,
         }
 
         try:
@@ -666,7 +744,7 @@ class WeighingApp(tk.Tk):
         tk.Label(popup, text="Nachkommastellen für Waage", **lbl_style).pack(pady=(22, 8))
 
         decimal_var = tk.StringVar(value=str(self.weight_decimal_places))
-        decimal_dropdown = tk.OptionMenu(popup, decimal_var, "1", "2", "3")
+        decimal_dropdown = tk.OptionMenu(popup, decimal_var, "0", "1", "2", "3")
         decimal_dropdown.config(**dropdown_style)
         decimal_dropdown["menu"].config(
             bg=THEME["input_bg"],
@@ -689,7 +767,7 @@ class WeighingApp(tk.Tk):
             except ValueError:
                 selected_places = 1
 
-            if selected_places not in [1, 2, 3]:
+            if selected_places not in [0, 1, 2, 3]:
                 selected_places = 1
 
             self.weight_decimal_places = selected_places
