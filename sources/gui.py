@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 TOP Team Combat Control
+#
+# SPDX-License-Identifier: CC0-1.0
+
 import tkinter as tk
 from tkinter import messagebox
 import pandas as pd

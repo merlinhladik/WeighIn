@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 TOP Team Combat Control
+#
+# SPDX-License-Identifier: CC0-1.0
+
 import time
 import base64
 import json
