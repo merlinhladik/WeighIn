@@ -436,8 +436,10 @@ class WeighingApp(tk.Tk):
         sex_raw = str(p.get("Geschlecht", "")).lower().strip()
         # Normalize sex: 'm', 'f', or ''
         sex = ""
-        if sex_raw.startswith("m"): sex = "m"
-        elif sex_raw.startswith("w") or sex_raw.startswith("f"): sex = "f"
+        if sex_raw.startswith("m"):
+            sex = "m"
+        elif sex_raw.startswith("w") or sex_raw.startswith("f"):
+            sex = "f"
 
         # Check Rules
         for rule in self.tolerance_rules:
@@ -480,7 +482,8 @@ class WeighingApp(tk.Tk):
         tol, _ = self.get_tolerance_for_participant(participant)
         
         net_weight = raw_float - tol
-        if net_weight < 0: net_weight = 0.0
+        if net_weight < 0:
+            net_weight = 0.0
         
         return f"{net_weight:.{places}f}"
 
@@ -560,7 +563,8 @@ class WeighingApp(tk.Tk):
         
         simulated_raw = round(random.uniform(20.0, 100.0), 1)
         simulated_net = simulated_raw - tol_val
-        if simulated_net < 0: simulated_net = 0.0
+        if simulated_net < 0:
+            simulated_net = 0.0
         
         self.weight_var.delete(0, tk.END)
         self.weight_var.insert(0, f"{simulated_net:.1f}")
@@ -843,7 +847,8 @@ class WeighingApp(tk.Tk):
     def delete_selected_rule(self):
         """Deletes the selected rule from the list."""
         sel = self.rules_listbox.curselection()
-        if not sel: return
+        if not sel:
+            return
         idx = sel[0]
         del self.tolerance_rules[idx]
         self.update_rules_listbox()
@@ -860,7 +865,8 @@ class WeighingApp(tk.Tk):
         
         # Name
         tk.Label(win, text="Name (e.g. U18)", **lbl_style).pack(pady=(10,0))
-        e_name = tk.Entry(win); e_name.pack()
+        e_name = tk.Entry(win)
+        e_name.pack()
         
         # Sex
         tk.Label(win, text="Sex", **lbl_style).pack(pady=(10,0))
@@ -869,14 +875,17 @@ class WeighingApp(tk.Tk):
         
         # Years
         tk.Label(win, text="Min Birth Year (empty=any)", **lbl_style).pack(pady=(10,0))
-        e_min = tk.Entry(win); e_min.pack()
+        e_min = tk.Entry(win)
+        e_min.pack()
         
         tk.Label(win, text="Max Birth Year (empty=any)", **lbl_style).pack(pady=(5,0))
-        e_max = tk.Entry(win); e_max.pack()
+        e_max = tk.Entry(win)
+        e_max.pack()
         
         # Tolerance
         tk.Label(win, text="Tolerance (kg)", **lbl_style).pack(pady=(10,0))
-        e_tol = tk.Entry(win); e_tol.pack()
+        e_tol = tk.Entry(win)
+        e_tol.pack()
         e_tol.insert(0, "0.1")
         
         def add():
@@ -912,7 +921,8 @@ class WeighingApp(tk.Tk):
 
         try:
             new_tol = float(tolerance_var.get().replace(",", "."))
-            if new_tol < 0: new_tol = 0.0
+            if new_tol < 0:
+                new_tol = 0.0
         except ValueError:
             new_tol = 0.0
         

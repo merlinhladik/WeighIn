@@ -9,7 +9,7 @@ from pyzbar.pyzbar import ZBarSymbol
 
 import asyncio
 import websockets
-import json
+
 
 URL = "ws://localhost:8765"
 

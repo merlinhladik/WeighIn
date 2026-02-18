@@ -40,8 +40,10 @@ last_boxes = None
 def red_mask(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
-    lower1 = np.array([0, 120, 80]);   upper1 = np.array([10, 255, 255])
-    lower2 = np.array([170, 120, 80]); upper2 = np.array([180, 255, 255])
+    lower1 = np.array([0, 120, 80])
+    upper1 = np.array([10, 255, 255])
+    lower2 = np.array([170, 120, 80])
+    upper2 = np.array([180, 255, 255])
 
     m1 = cv2.inRange(hsv, lower1, upper1)
     m2 = cv2.inRange(hsv, lower2, upper2)
@@ -136,7 +138,8 @@ def auto_digit_boxes_from_mask(mask):
 def decode_from_fixed_boxes(mask, boxes):
     digits = []
     for (x, y, w, h) in boxes:
-        x1 = max(0, x); y1 = max(0, y)
+        x1 = max(0, x)
+        y1 = max(0, y)
         x2 = min(mask.shape[1], x + w)
         y2 = min(mask.shape[0], y + h)
 
