@@ -18,7 +18,7 @@ PAID = "Zahlung erfolgt"
 UNPAID = "Zahlung offen"
 
 JSON_FILE = "../data.json"
-SETTINGS_FILE = "settings.json"
+SETTINGS_FILE = "../settings.json"
 WS_HOST = "localhost"
 WS_PORT = 8765
 
