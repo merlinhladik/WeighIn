@@ -5,13 +5,20 @@ stages:
  - test
  - docs
 
-# For debugging
 before_script:
   - python --version
   - pip --version  
   - python -m pip install --upgrade pip
+  - pip install ruff
   - apt-get update -y
   - apt-get install -y doxygen
+
+lint:
+  stage: lint
+  script:
+    - echo "Running ruff linter..."
+    - ruff check backend/ frontend/ utils/
+    - echo "Code quality check passed"
 
 build:
   stage: build
