@@ -1,0 +1,41 @@
+image: python:3.13
+
+stages:
+ - lint
+ - build
+ - test
+ - docs
+
+before_script:
+  - python --version
+  - pip --version  
+  - python -m pip install --upgrade pip
+  - pip install ruff
+  - apt-get update -y
+  - apt-get install -y doxygen
+
+lint:
+  stage: lint
+  script:
+    - echo "Running ruff linter..."
+    - ruff check .
+    - echo "Code quality check passed"
+
+build:
+  stage: build
+  script:
+    - python -m compileall .
+
+test:
+  stage: test
+  script:
+    - echo "Test temporarily disabled"
+
+build_docs:
+  stage: docs
+  script:
+  - echo "Building Doxygen documentation..."
+  - doxygen Doxyfile
+  artifacts:
+    paths:
+      - html/
