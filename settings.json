@@ -1,6 +1,4 @@
-/* SPDX-FileCopyrightText: 2026 TOP Team Combat Control
-SPDX-License-Identifier: CC0-1.0 */
-
 {
-  "weight_decimal_places": 2
+  "weight_decimal_places": 2,
+  "data_file_path": "C:/Users/fuchs/TOP_Repos/weighin/data.json"
 }

@@ -2,26 +2,23 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 import pandas as pd
 import json
 import os
-import random
 import asyncio
 import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Any
+import websockets
 
-try:
-    import websockets
-except ImportError:
-    websockets = None
 
 PAID = "Zahlung erfolgt"
 UNPAID = "Zahlung offen"
 
-JSON_FILE = "../data.json"
-SETTINGS_FILE = "../settings.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_JSON_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "data.json"))
+SETTINGS_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "settings.json"))
 WS_HOST = "localhost"
 WS_PORT = 8765
 WEIGHT_KEY = "Gewicht (kg)"
@@ -56,6 +53,7 @@ class WeighingApp(tk.Tk):
         # Data Storage
         self.participants: List[Dict[str, Any]] = []
         self.selected_participant: Optional[Dict[str, Any]] = None
+        self.data_file_path: str = DEFAULT_JSON_FILE
         self.pending_received_weight: Optional[int] = None
         self.weight_decimal_places: int = 1
         self.weight_popup: Optional[tk.Toplevel] = None
@@ -377,12 +375,12 @@ class WeighingApp(tk.Tk):
 
     def load_data(self):
         """Loads participant data from the Excel file."""
-        if not os.path.exists(JSON_FILE):
-             messagebox.showerror("Error", f"Excel file not found: {JSON_FILE}")
+        if not os.path.exists(self.data_file_path):
+             messagebox.showerror("Error", f"Data file not found: {self.data_file_path}")
              return
 
         try:
-            with open(JSON_FILE, "r", encoding="utf-8-sig") as f:
+            with open(self.data_file_path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             raw_participants = data if isinstance(data, list) else data.get("participants", [])
             normalized: List[Dict[str, Any]] = []
@@ -425,9 +423,8 @@ class WeighingApp(tk.Tk):
             birthdate = ""
 
         for key in TEXT_KEYS:
-            result[key] = WeighingApp.fix_mojibake_text(result.get(key))
-
-        birthdate = result.get(BIRTHDATE_KEY, "")
+            if key in result:
+                result[key] = WeighingApp.fix_mojibake_text(result.get(key))
 
         result[WEIGHT_KEY] = weight
         result[VALID_KEY] = is_valid
@@ -465,6 +462,7 @@ class WeighingApp(tk.Tk):
     def load_settings(self):
         """Loads app settings from JSON and applies safe defaults."""
         self.weight_decimal_places = 1
+        self.data_file_path = DEFAULT_JSON_FILE
         if not os.path.exists(SETTINGS_FILE):
             return
 
@@ -480,10 +478,22 @@ class WeighingApp(tk.Tk):
         if isinstance(value, int) and value in [0, 1, 2, 3]:
             self.weight_decimal_places = value
 
+        data_file = settings.get("data_file_path")
+        if isinstance(data_file, str) and data_file.strip():
+            self.data_file_path = data_file.strip()
+
     def save_settings(self):
         """Persists app settings to JSON."""
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"weight_decimal_places": self.weight_decimal_places}, f, ensure_ascii=False, indent=2)
+            json.dump(
+                {
+                    "weight_decimal_places": self.weight_decimal_places,
+                    "data_file_path": self.data_file_path,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
 
     def format_scale_weight(self, raw_weight: int) -> str:
         """Formats integer scale input based on configured decimal places."""
@@ -543,23 +553,35 @@ class WeighingApp(tk.Tk):
 
     def save_data(self):
         """Writes current participant data back to JSON."""
-        with open(JSON_FILE, "w", encoding="utf-8") as f:
+        with open(self.data_file_path, "w", encoding="utf-8") as f:
             json.dump(self.participants, f, ensure_ascii=False, indent=2)
 
     def read_scale(self):
-        """Applies pending scale value or simulates one when no external value exists."""
+        """Requests a new reading from the connected weight scanner."""
         if self.pending_received_weight is not None:
-            formatted_weight = self.format_scale_weight(self.pending_received_weight)
-            self.weight_var.delete(0, tk.END)
-            self.weight_var.insert(0, formatted_weight)
-            self.pending_received_weight = None
-            self.close_weight_popup()
+            self.show_weight_popup(self.pending_received_weight)
             return
 
-        simulated_weight = round(random.uniform(20.0, 100.0), 1)
+        if not self.ws_loop or not self.ws_clients:
+            messagebox.showwarning("Scale", "No scale client connected.")
+            return
+
+        self.send_ws_payload({"type": "REQUEST_WEIGHT"})
+
+    def accept_pending_weight(self):
+        """Accepts the pending received weight and writes it into the weight field."""
+        if self.pending_received_weight is None:
+            return
+        formatted_weight = self.format_scale_weight(self.pending_received_weight)
         self.weight_var.delete(0, tk.END)
-        self.weight_var.insert(0, str(simulated_weight))
-        messagebox.showinfo("Scale", f"Read from scale: {simulated_weight} kg")
+        self.weight_var.insert(0, formatted_weight)
+        self.pending_received_weight = None
+        self.close_weight_popup()
+
+    def cancel_pending_weight(self):
+        """Rejects the pending weight and closes the confirmation popup."""
+        self.pending_received_weight = None
+        self.close_weight_popup()
 
     def save_weight(self):
         """Saves edited person data and weight to memory and JSON."""
@@ -728,7 +750,7 @@ class WeighingApp(tk.Tk):
         """Opens a dialog to configure app settings."""
         popup = tk.Toplevel(self)
         popup.title("Einstellungen")
-        popup.geometry("380x220")
+        popup.geometry("520x360")
         popup.configure(bg=THEME["bg"])
         popup.resizable(False, False)
 
@@ -744,7 +766,7 @@ class WeighingApp(tk.Tk):
             "width": 10,
         }
 
-        tk.Label(popup, text="Nachkommastellen für Waage", **lbl_style).pack(pady=(22, 8))
+        tk.Label(popup, text="Nachkommastellen f?r Waage", **lbl_style).pack(pady=(22, 8))
 
         decimal_var = tk.StringVar(value=str(self.weight_decimal_places))
         decimal_dropdown = tk.OptionMenu(popup, decimal_var, "0", "1", "2", "3")
@@ -762,7 +784,54 @@ class WeighingApp(tk.Tk):
             "Beispiel: Eingang 7564 bei 2 Nachkommastellen\n"
             "wird zu 75.64 kg."
         )
-        tk.Label(popup, text=note, bg=THEME["bg"], fg="gray", font=("Arial", 10), justify="center").pack(pady=(12, 10))
+        tk.Label(popup, text=note, bg=THEME["bg"], fg="gray", font=("Arial", 10), justify="center").pack(pady=(12, 8))
+
+        tk.Label(popup, text="Datenquelle", **lbl_style).pack(pady=(8, 6))
+        path_label = tk.Label(
+            popup,
+            text=self.data_file_path,
+            bg=THEME["bg"],
+            fg="gray",
+            font=("Arial", 9),
+            wraplength=470,
+            justify="center",
+        )
+        path_label.pack(padx=15)
+
+        def choose_data_file():
+            initial_dir = os.path.dirname(self.data_file_path) if self.data_file_path else os.path.dirname(DEFAULT_JSON_FILE)
+            selected_path = filedialog.askopenfilename(
+                parent=popup,
+                title="Daten laden",
+                initialdir=initial_dir,
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            )
+            if not selected_path:
+                return
+
+            try:
+                with open(selected_path, "r", encoding="utf-8-sig") as f:
+                    payload = json.load(f)
+                if not isinstance(payload, (list, dict)):
+                    raise ValueError("Unsupported data format.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not load selected file: {e}", parent=popup)
+                return
+
+            self.data_file_path = selected_path
+            self.save_settings()
+            self.load_data()
+            path_label.config(text=self.data_file_path)
+
+        tk.Button(
+            popup,
+            text="Daten laden",
+            command=choose_data_file,
+            bg=THEME["input_bg"],
+            fg="white",
+            font=("Arial", 10, "bold"),
+            width=20,
+        ).pack(pady=(8, 4))
 
         def save_and_close():
             try:
@@ -782,7 +851,7 @@ class WeighingApp(tk.Tk):
             popup.destroy()
 
         button_frame = tk.Frame(popup, bg=THEME["bg"])
-        button_frame.pack(pady=8)
+        button_frame.pack(pady=10)
 
         tk.Button(
             button_frame,
@@ -966,12 +1035,35 @@ class WeighingApp(tk.Tk):
 
             hint_label = tk.Label(
                 popup,
-                text="Mit 'take current weight' ubernehmen",
+                text="Gewicht übernehmen?",
                 bg=THEME["bg"],
                 fg="gray",
                 font=("Arial", 10),
             )
-            hint_label.pack(pady=(0, 16))
+            hint_label.pack(pady=(0, 8))
+
+            button_frame = tk.Frame(popup, bg=THEME["bg"])
+            button_frame.pack(pady=(0, 16))
+
+            tk.Button(
+                button_frame,
+                text="OK",
+                command=self.accept_pending_weight,
+                bg=THEME["success"],
+                fg="black",
+                font=("Arial", 10, "bold"),
+                width=10,
+            ).pack(side=tk.LEFT, padx=8)
+
+            tk.Button(
+                button_frame,
+                text="Cancel",
+                command=self.cancel_pending_weight,
+                bg=THEME["error"],
+                fg="white",
+                font=("Arial", 10, "bold"),
+                width=10,
+            ).pack(side=tk.LEFT, padx=8)
 
             self.weight_popup = popup
             self.weight_popup_name_label = name_label

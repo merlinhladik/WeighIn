@@ -88,7 +88,7 @@
     "Gueltigkeit": false,
     "Geschlecht": "maennlich",
     "Bezahlt": true,
-    "Geburtsdatum": ""
+    "Geburtsdatum": "---"
   },
   {
     "ID": 8,

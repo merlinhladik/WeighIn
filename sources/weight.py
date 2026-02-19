@@ -5,47 +5,37 @@
 # Build WebSocket Connection
 # =========================
 import asyncio
-import websockets
 import json
 
 import cv2
 import numpy as np
+import websockets
 
 URL = "ws://localhost:8765"
 
-async def send_weight(weight):
-    async with websockets.connect(URL) as websocket:
-        print("Connected to server")
-
-        message = {
-                "type": "weight",
-                "weight": weight
-        }
-
-        await websocket.send(json.dumps(message))
-        print("Sent: ", message)
-
-# ---------------------------------
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-cap.set(cv2.CAP_PROP_EXPOSURE, -10)
-
-if not cap.isOpened():
-    raise RuntimeError("Webcam konnte nicht geöffnet werden.")
-
-DECODE_W, DECODE_H = 80, 140  
+DECODE_W, DECODE_H = 80, 140
 BOX_W, BOX_H = 100, 160
-MIN_DIGITS, MAX_DIGITS = 3, 5    
+MIN_DIGITS, MAX_DIGITS = 3, 5
 
-last_boxes = None
+
+async def send_weight(weight, websocket=None):
+    message = {"type": "weight", "weight": weight}
+    if websocket is None:
+        async with websockets.connect(URL) as socket:
+            print("Connected to server")
+            await socket.send(json.dumps(message))
+    else:
+        await websocket.send(json.dumps(message))
+    print("Sent: ", message)
+
 
 
 def red_mask(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
-    lower1 = np.array([0, 120, 80])   
+    lower1 = np.array([0, 120, 80])
     upper1 = np.array([10, 255, 255])
-    lower2 = np.array([170, 120, 80]) 
+    lower2 = np.array([170, 120, 80])
     upper2 = np.array([180, 255, 255])
 
     m1 = cv2.inRange(hsv, lower1, upper1)
@@ -61,17 +51,18 @@ def red_mask(bgr):
 
 # 7-Segment Mapping: (top, top-left, top-right, mid, bottom-left, bottom-right, bottom)
 SEG2DIG = {
-    (1,1,1,0,1,1,1): 0,
-    (0,0,1,0,0,1,0): 1,
-    (1,0,1,1,1,0,1): 2,
-    (1,0,1,1,0,1,1): 3,
-    (0,1,1,1,0,1,0): 4,
-    (1,1,0,1,0,1,1): 5,
-    (1,1,0,1,1,1,1): 6,
-    (1,0,1,0,0,1,0): 7,
-    (1,1,1,1,1,1,1): 8,
-    (1,1,1,1,0,1,1): 9,
+    (1, 1, 1, 0, 1, 1, 1): 0,
+    (0, 0, 1, 0, 0, 1, 0): 1,
+    (1, 0, 1, 1, 1, 0, 1): 2,
+    (1, 0, 1, 1, 0, 1, 1): 3,
+    (0, 1, 1, 1, 0, 1, 0): 4,
+    (1, 1, 0, 1, 0, 1, 1): 5,
+    (1, 1, 0, 1, 1, 1, 1): 6,
+    (1, 0, 1, 0, 0, 1, 0): 7,
+    (1, 1, 1, 1, 1, 1, 1): 8,
+    (1, 1, 1, 1, 0, 1, 1): 9,
 }
+
 
 def decode_7seg_digit(bin_digit):
     if bin_digit is None or bin_digit.size == 0:
@@ -84,13 +75,13 @@ def decode_7seg_digit(bin_digit):
     img = bin_digit
 
     regions = [
-        (int(w*0.30), int(h*0.00), int(w*0.70),    int(h*0.20)),   # top
-        (0,           int(h*0.20), int(w*0.50),  int(h*0.40)),  # tl
-        (int(w*0.50), int(h*0.20), w,            int(h*0.40)),  # tr
-        (int(w*0.30), int(h*0.40), int(w*0.70),  int(h*0.62)),   # mid
-        (0,           int(h*0.60), int(w*0.50),  int(h*0.80)),   # bl
-        (int(w*0.50), int(h*0.60), w,            int(h*0.80)),   # br
-        (0,           int(h*0.80), w,            h),             # bottom
+        (int(w * 0.30), int(h * 0.00), int(w * 0.70), int(h * 0.20)),  # top
+        (0, int(h * 0.20), int(w * 0.50), int(h * 0.40)),  # tl
+        (int(w * 0.50), int(h * 0.20), w, int(h * 0.40)),  # tr
+        (int(w * 0.30), int(h * 0.40), int(w * 0.70), int(h * 0.62)),  # mid
+        (0, int(h * 0.60), int(w * 0.50), int(h * 0.80)),  # bl
+        (int(w * 0.50), int(h * 0.60), w, int(h * 0.80)),  # br
+        (0, int(h * 0.80), w, h),  # bottom
     ]
 
     on = []
@@ -106,6 +97,7 @@ def decode_7seg_digit(bin_digit):
     return SEG2DIG.get(tuple(on), None)
 
 
+
 def auto_digit_boxes_from_mask(mask):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -117,31 +109,31 @@ def auto_digit_boxes_from_mask(mask):
     if not raw or len(raw) < MIN_DIGITS:
         return None
 
-
     raw.sort(key=lambda b: b[0])
 
     if len(raw) > MAX_DIGITS:
         raw = raw[:MAX_DIGITS]
 
     boxes = []
-    
-    for (x, y, w, h) in raw:
-        anchor_x = x + w              
-        anchor_y = y + h / 2.0        
 
-        shift_x = int(round(BOX_W*0.05))
-        x1 = int(round(anchor_x - BOX_W + shift_x))      
-        y1 = int(round(anchor_y - BOX_H / 2))  
+    for (x, y, w, h) in raw:
+        anchor_x = x + w
+        anchor_y = y + h / 2.0
+
+        shift_x = int(round(BOX_W * 0.05))
+        x1 = int(round(anchor_x - BOX_W + shift_x))
+        y1 = int(round(anchor_y - BOX_H / 2))
 
         boxes.append((x1, y1, BOX_W, BOX_H))
-      
+
     return boxes
+
 
 
 def decode_from_fixed_boxes(mask, boxes):
     digits = []
     for (x, y, w, h) in boxes:
-        x1 = max(0, x) 
+        x1 = max(0, x)
         y1 = max(0, y)
         x2 = min(mask.shape[1], x + w)
         y2 = min(mask.shape[0], y + h)
@@ -156,72 +148,111 @@ def decode_from_fixed_boxes(mask, boxes):
 
     if any(d is None for d in digits) or len(digits) == 0:
         return None, digits
-    
+
     return "".join(str(d) for d in digits), digits
 
 
-print("Tasten: s = Snapshot+Auswertung (AUTO boxes) | q = quit")
 
-while True:
-    ok, frame = cap.read()
-    if not ok or frame is None:
-        break
+def _decode_current_weight(frame, last_boxes):
+    mask = red_mask(frame)
 
-    disp = frame.copy()
-    cv2.imshow("live", disp)
-
-    key = cv2.waitKey(1) & 0xFF
-
-    if key == ord('s'):
-        mask = red_mask(frame)
-
-        boxes = auto_digit_boxes_from_mask(mask)
+    boxes = auto_digit_boxes_from_mask(mask)
+    if boxes is None:
+        boxes = last_boxes
         if boxes is None:
-            if last_boxes is not None:
-                boxes = last_boxes
-            else:
-                print("Auto-Detection fehlgeschlagen (weniger als 3 Ziffern gefunden).")
+            print("Auto-Detection fehlgeschlagen (weniger als 3 Ziffern gefunden).")
+            return None, None, last_boxes
+    else:
+        last_boxes = boxes
+
+    text, digits = decode_from_fixed_boxes(mask, boxes)
+
+    # Debug: show mask + boxes + segment regions
+    dbg = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+    for (bx, by, bw, bh) in boxes:
+        cv2.rectangle(dbg, (bx, by), (bx + bw, by + bh), (0, 255, 0), 1)
+
+        h = bh
+        w = bw
+        x_l = int(w * 0.30)
+        x_r = int(w * 0.70)
+
+        regions = [
+            (x_l, int(h * 0.00), x_r, int(h * 0.20)),  # top
+            (0, int(h * 0.20), int(w * 0.50), int(h * 0.40)),  # tl
+            (int(w * 0.50), int(h * 0.20), w, int(h * 0.40)),  # tr
+            (x_l, int(h * 0.40), x_r, int(h * 0.62)),  # mid
+            (0, int(h * 0.60), int(w * 0.50), int(h * 0.80)),  # bl
+            (int(w * 0.50), int(h * 0.60), w, int(h * 0.80)),  # br
+            (x_l, int(h * 0.80), x_r, h),  # bottom
+        ]
+
+        for (x1, y1, x2, y2) in regions:
+            cv2.rectangle(dbg, (bx + x1, by + y1), (bx + x2, by + y2), (255, 0, 0), 1)
+
+    cv2.imshow("debug (FULL)", dbg)
+
+    return text, digits, last_boxes
+
+
+async def _run_weight_scanner_loop(cap):
+    last_boxes = None
+
+    async with websockets.connect(URL) as websocket:
+        print("Connected to server")
+        print("Warte auf REQUEST_WEIGHT von der GUI. Taste q beendet.")
+
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+
+            cv2.imshow("live", frame.copy())
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+
+            try:
+                raw = await asyncio.wait_for(websocket.recv(), timeout=0.01)
+            except asyncio.TimeoutError:
                 continue
-        else:
-            last_boxes = boxes
+            except Exception as err:
+                print(f"WebSocket Fehler: {err}")
+                break
 
-        text, digits = decode_from_fixed_boxes(mask, boxes)
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
 
-        # Debug: show mask + boxes + segment regions
-        dbg = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            if payload.get("type") != "REQUEST_WEIGHT":
+                continue
 
-        for (bx, by, bw, bh) in boxes:
-            cv2.rectangle(dbg, (bx, by), (bx+bw, by+bh), (0, 255, 0), 1)
+            text, digits, last_boxes = _decode_current_weight(frame, last_boxes)
+            if text is None:
+                failed = [i for i, d in enumerate(digits or []) if d is None]
+                failed_human = [i + 1 for i in failed]
+                print(f"Konnte nicht sicher decodieren. Fehler bei Ziffer(n): {failed_human} | digits={digits}")
+                continue
 
-            h = bh
-            w = bw
-            xL = int(w * 0.30)
-            xR = int(w * 0.70)
+            await send_weight(text, websocket=websocket)
 
-            regions = [
-                (xL,          int(h*0.00), xR,           int(h*0.20)),  # top
-                (0,           int(h*0.20), int(w*0.50),  int(h*0.40)),  # tl
-                (int(w*0.50), int(h*0.20), w,            int(h*0.40)),  # tr
-                (xL,          int(h*0.40), xR,           int(h*0.62)),  # mid
-                (0,           int(h*0.60), int(w*0.50),  int(h*0.80)),   # bl
-                (int(w*0.50), int(h*0.60), w,            int(h*0.80)),   # br
-                (xL,          int(h*0.80), xR,           h),            # bottom
-            ]
 
-            for (x1, y1, x2, y2) in regions:
-                cv2.rectangle(dbg, (bx + x1, by + y1), (bx + x2, by + y2), (255, 0, 0), 1)
+def run_weight_scanner(cam_index: int = 0):
+    cap = cv2.VideoCapture(cam_index)
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+    cap.set(cv2.CAP_PROP_EXPOSURE, -10)
 
-        cv2.imshow("debug (FULL)", dbg)
+    if not cap.isOpened():
+        raise RuntimeError("Webcam konnte nicht geoeffnet werden.")
 
-        if text is None:
-            failed = [i for i, d in enumerate(digits) if d is None]
-            failed_human = [i+1 for i in failed]
-            print(f"Konnte nicht sicher decodieren. Fehler bei Ziffer(n): {failed_human} | digits={digits}")
-        else:
-            asyncio.run(send_weight(text))
+    try:
+        asyncio.run(_run_weight_scanner_loop(cap))
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
-    elif key == ord('q'):
-        break
 
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    run_weight_scanner()
