@@ -14,13 +14,11 @@ before_script:
   - python --version
   - pip --version  
   - python -m pip install --upgrade pip
-  - pip install ruff
-  - apt-get update -y
-  - apt-get install -y doxygen
 
 lint:
   stage: lint
   script:
+    - pip install ruff
     - echo "Running ruff linter..."
     - ruff check sources/
     - pip install reuse
@@ -44,6 +42,8 @@ test:
 build_docs:
   stage: docs
   script:
+  - apt-get update -y
+  - apt-get install -y doxygen
   - echo "Building Doxygen documentation..."
   - doxygen Doxyfile
   artifacts:
