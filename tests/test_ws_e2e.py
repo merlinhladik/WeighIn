@@ -24,6 +24,9 @@ class DummyApp:
     def apply_qr_search(self, name):
         self.received_name = name
 
+    def handle_incoming_qr(self, qr_data):
+        self.apply_qr_search(qr_data.get("name", ""))
+
 
 async def _start_test_server(app):
     server = await websockets.serve(app._ws_handler, "127.0.0.1", 0)

@@ -13,6 +13,8 @@ fi
 source "$VENV_DIR/bin/activate"
 cd "$SCRIPT_DIR"
 
-"$VENV_DIR/bin/python" sources/gui.py &
-"$VENV_DIR/bin/python" sources/real_scanner.py &
-"$VENV_DIR/bin/python" sources/weight.py &
+mkdir -p "$SOURCE_DIR/logs"
+
+"$VENV_DIR/bin/python" sources/gui.py > "$SOURCE_DIR/logs/gui.log" 2>&1 &
+sudo "$VENV_DIR/bin/python" sources/real_scanner.py > "$SOURCE_DIR/logs/qr.log" 2>&1 &
+"$VENV_DIR/bin/python" sources/weight.py > "$SOURCE_DIR/logs/weight.log" 2>&1 & 

@@ -1,34 +1,18 @@
 # SPDX-FileCopyrightText: 2026 TOP Team Combat Control
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# =========================
-# Build WebSocket Connection
-# =========================
-import asyncio
-import json
-
 import cv2
 import numpy as np
-import websockets
+import logging
+from wsclient import WebSocketClient, WeightClient
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 URL = "ws://localhost:8765"
 
 DECODE_W, DECODE_H = 80, 140
-BOX_W, BOX_H = 100, 160
 MIN_DIGITS, MAX_DIGITS = 3, 5
-
-
-async def send_weight(weight, websocket=None):
-    message = {"type": "weight", "weight": weight}
-    if websocket is None:
-        async with websockets.connect(URL) as socket:
-            print("Connected to server")
-            await socket.send(json.dumps(message))
-    else:
-        await websocket.send(json.dumps(message))
-    print("Sent: ", message)
-
-
 
 def red_mask(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -76,12 +60,12 @@ def decode_7seg_digit(bin_digit):
 
     regions = [
         (int(w * 0.30), int(h * 0.00), int(w * 0.70), int(h * 0.20)),  # top
-        (0, int(h * 0.20), int(w * 0.50), int(h * 0.40)),  # tl
-        (int(w * 0.50), int(h * 0.20), w, int(h * 0.40)),  # tr
+        (0            , int(h * 0.20), int(w * 0.50), int(h * 0.40)),  # tl
+        (int(w * 0.50), int(h * 0.20), w            , int(h * 0.40)),  # tr
         (int(w * 0.30), int(h * 0.40), int(w * 0.70), int(h * 0.62)),  # mid
-        (0, int(h * 0.60), int(w * 0.50), int(h * 0.80)),  # bl
-        (int(w * 0.50), int(h * 0.60), w, int(h * 0.80)),  # br
-        (0, int(h * 0.80), w, h),  # bottom
+        (0            , int(h * 0.60), int(w * 0.50), int(h * 0.80)),  # bl
+        (int(w * 0.50), int(h * 0.60), w            , int(h * 0.80)),  # br
+        (0            , int(h * 0.80), w            , h            ),  # bottom
     ]
 
     on = []
@@ -98,7 +82,7 @@ def decode_7seg_digit(bin_digit):
 
 
 
-def auto_digit_boxes_from_mask(mask):
+def auto_digit_boxes_from_mask(mask, min_w_over_h=0.6, pad_x=0.10, pad_y=0.15):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     raw = []
@@ -115,20 +99,27 @@ def auto_digit_boxes_from_mask(mask):
         raw = raw[:MAX_DIGITS]
 
     boxes = []
+    for (x, y, w_raw, h_raw) in raw:
+        w = w_raw * (1.0 + pad_x)
+        h = h_raw * (1.0 + pad_y)
 
-    for (x, y, w, h) in raw:
-        anchor_x = x + w
-        anchor_y = y + h / 2.0
+        if (w / h) < min_w_over_h:
+            w = min_w_over_h * h
 
-        shift_x = int(round(BOX_W * 0.05))
-        x1 = int(round(anchor_x - BOX_W + shift_x))
-        y1 = int(round(anchor_y - BOX_H / 2))
+        w = int(round(w))
+        h = int(round(h))
 
-        boxes.append((x1, y1, BOX_W, BOX_H))
+        anchor_x = x + w_raw          
+        anchor_y = y + h_raw / 2.0
+
+        shift_x = int(round(w * 0.05))
+
+        x1 = int(round(anchor_x - w + shift_x))
+        y1 = int(round(anchor_y - h / 2.0))
+
+        boxes.append((x1, y1, w, h))
 
     return boxes
-
-
 
 def decode_from_fixed_boxes(mask, boxes):
     digits = []
@@ -147,9 +138,9 @@ def decode_from_fixed_boxes(mask, boxes):
         digits.append(decode_7seg_digit(dimg))
 
     if any(d is None for d in digits) or len(digits) == 0:
-        return None, digits
+        return None
 
-    return "".join(str(d) for d in digits), digits
+    return "".join(str(d) for d in digits)
 
 
 
@@ -160,12 +151,12 @@ def _decode_current_weight(frame, last_boxes):
     if boxes is None:
         boxes = last_boxes
         if boxes is None:
-            print("Auto-Detection fehlgeschlagen (weniger als 3 Ziffern gefunden).")
-            return None, None, last_boxes
+            logger.error("Auto Detection failed, no boxes found")
+            return None, last_boxes
     else:
         last_boxes = boxes
 
-    text, digits = decode_from_fixed_boxes(mask, boxes)
+    text= decode_from_fixed_boxes(mask, boxes)
 
     # Debug: show mask + boxes + segment regions
     dbg = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
@@ -191,68 +182,56 @@ def _decode_current_weight(frame, last_boxes):
         for (x1, y1, x2, y2) in regions:
             cv2.rectangle(dbg, (bx + x1, by + y1), (bx + x2, by + y2), (255, 0, 0), 1)
 
-    cv2.imshow("debug (FULL)", dbg)
+    cv2.imshow("debug", dbg)
 
-    return text, digits, last_boxes
-
-
-async def _run_weight_scanner_loop(cap):
-    last_boxes = None
-
-    async with websockets.connect(URL) as websocket:
-        print("Connected to server")
-        print("Warte auf REQUEST_WEIGHT von der GUI. Taste q beendet.")
-
-        while True:
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                break
-
-            cv2.imshow("live", frame.copy())
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-
-            try:
-                raw = await asyncio.wait_for(websocket.recv(), timeout=0.01)
-            except asyncio.TimeoutError:
-                continue
-            except Exception as err:
-                print(f"WebSocket Fehler: {err}")
-                break
-
-            try:
-                payload = json.loads(raw)
-            except Exception:
-                continue
-
-            if payload.get("type") != "REQUEST_WEIGHT":
-                continue
-
-            text, digits, last_boxes = _decode_current_weight(frame, last_boxes)
-            if text is None:
-                failed = [i for i, d in enumerate(digits or []) if d is None]
-                failed_human = [i + 1 for i in failed]
-                print(f"Konnte nicht sicher decodieren. Fehler bei Ziffer(n): {failed_human} | digits={digits}")
-                continue
-
-            await send_weight(text, websocket=websocket)
+    return text, last_boxes
 
 
-def run_weight_scanner(cam_index: int = 0):
+async def main(cam_index: int = 0):
     cap = cv2.VideoCapture(cam_index)
     cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
     cap.set(cv2.CAP_PROP_EXPOSURE, -10)
-
     if not cap.isOpened():
-        raise RuntimeError("Webcam konnte nicht geoeffnet werden.")
+        raise RuntimeError("Webcam cannot be opened.")
+
+    last_boxes = None
+
+    ws = WebSocketClient(URL)
+    await ws.connect()
+    logger.info("WS connected: %s", URL)
+
+    def weight_provider():
+        nonlocal last_boxes
+
+        text, last_boxes = _decode_current_weight(frame, last_boxes)
+        if text is None:
+            return None
+        
+        return text
+
+    weight_client = WeightClient(ws, weight_provider)
 
     try:
-        asyncio.run(_run_weight_scanner_loop(cap))
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                return None
+
+            cv2.imshow("live", frame)
+            cv2.waitKey(1)
+
+            try:
+                msg = await asyncio.wait_for(ws.recv_json(), timeout=0.01)
+            except asyncio.TimeoutError:
+                continue
+
+            await weight_client.handle_message(msg)
+
     finally:
+        await ws.close()
         cap.release()
         cv2.destroyAllWindows()
 
-
 if __name__ == "__main__":
-    run_weight_scanner()
+    import asyncio
+    asyncio.run(main())
