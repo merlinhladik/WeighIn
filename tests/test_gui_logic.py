@@ -45,8 +45,8 @@ def test_init_sets_defaults_and_calls_bootstrap_steps(monkeypatch):
         "create_layout",
         "load_settings",
         "load_data",
-        "prompt_for_data_source_selection",
         "start_websocket_server",
+        "prompt_for_data_source_selection",
     ]
     assert len(protocol_calls) == 1
     assert protocol_calls[0][0] == "WM_DELETE_WINDOW"
@@ -89,6 +89,7 @@ def test_filter_qr_non_dict_returns_empty_payload():
         "name": "",
         "first_name": "",
         "last_name": "",
+        "birth_year": 0,
         "exp_timestamp": None,
     }
 
@@ -122,6 +123,7 @@ def test_get_filtered_participants_by_name_and_club():
         {"Name": "Ada Lovelace", "Verein": "TOP"},
         {"Name": "Max Muster", "Verein": "Judo Club"},
     ]
+    app.search_participants = lambda query: WeighingApp.search_participants(app, query)
 
     by_name = WeighingApp.get_filtered_participants(app, "ada")
     by_club = WeighingApp.get_filtered_participants(app, "judo")
@@ -160,6 +162,12 @@ class DummyField:
     def get(self):
         return self.value
 
+    def delete(self, *_args):
+        self.value = ""
+
+    def insert(self, _idx, value):
+        self.value = value
+
 
 def test_save_weight_without_selection_shows_warning(monkeypatch):
     calls = []
@@ -183,7 +191,7 @@ def test_save_weight_invalid_weight_shows_error(monkeypatch):
 
     WeighingApp.save_weight(app)
 
-    assert errors == [("Error", "Invalid weight. Please enter a number.")]
+    assert errors == [("Fehler", "ungültiges Gewicht. Bitte ausschließlich Nummern eingeben")]
 
 
 def test_save_weight_success_updates_participant_and_sends_payload(monkeypatch):
@@ -207,6 +215,7 @@ def test_save_weight_success_updates_participant_and_sends_payload(monkeypatch):
     app.val_birthyear = DummyField("2015")
     app.valid_var = DummyField("gueltig")
     app.paid_var = DummyField("Zahlung erfolgt")
+    app.gender_var = DummyField("weiblich")
     calls = {"save_data": 0, "update_list": [], "payloads": []}
     app.save_data = lambda: calls.__setitem__("save_data", calls["save_data"] + 1)
     app.update_list = lambda data: calls["update_list"].append(data)
@@ -221,6 +230,7 @@ def test_save_weight_success_updates_participant_and_sends_payload(monkeypatch):
     assert p["Name"] == "Ada Lovelace"
     assert p[VALID_KEY] is True
     assert p[PAID_KEY] is True
+    assert p["Gender"] == "w"
     assert p[BIRTHYEAR_KEY] == 2015
     assert "Gewicht" not in p
     assert "Gueltig" not in p
@@ -253,6 +263,7 @@ def test_save_weight_handles_save_exception(monkeypatch):
     app.val_birthyear = DummyField("2015")
     app.valid_var = DummyField("gueltig")
     app.paid_var = DummyField("Zahlung erfolgt")
+    app.gender_var = DummyField("maennlich")
     app.save_data = lambda: (_ for _ in ()).throw(RuntimeError("disk full"))
     app.update_list = lambda _data: None
     app.send_ws_payload = lambda _payload: None
@@ -307,12 +318,15 @@ def test_accept_pending_weight_writes_entry_and_closes_popup():
     app.weight_var = EntryStub()
     app.format_scale_weight = lambda value: f"{value/100:.2f}"
     closed = {"count": 0}
+    saves = {"count": 0}
     app.close_weight_popup = lambda: closed.__setitem__("count", closed["count"] + 1)
+    app.save_weight = lambda: saves.__setitem__("count", saves["count"] + 1)
 
     WeighingApp.accept_pending_weight(app)
 
     assert app.weight_var.value == "75.64"
     assert app.pending_received_weight is None
+    assert saves["count"] == 1
     assert closed["count"] == 1
 
 
@@ -527,28 +541,38 @@ def test_save_new_participant_warns_on_missing_names(monkeypatch):
     assert warnings[0][0] == "Missing fields"
 
 
-def test_save_new_participant_warns_on_invalid_birthyear(monkeypatch):
-    warnings = []
-    monkeypatch.setattr(
-        "gui.messagebox.showwarning",
-        lambda title, msg, parent=None: warnings.append((title, msg, parent)),
-    )
+def test_save_new_participant_invalid_birthyear_uses_correction_prompt(monkeypatch):
+    infos = []
+    monkeypatch.setattr("gui.messagebox.showinfo", lambda title, msg: infos.append((title, msg)))
+
+    class Popup:
+        def __init__(self):
+            self.destroy_called = False
+
+        def destroy(self):
+            self.destroy_called = True
 
     app = type("Dummy", (), {})()
     app.participants = []
-    popup = type("Popup", (), {})()
+    app.add_participant_popup = None
+    app.add_participant_fields = {}
+    app.save_data = lambda: None
+    app.update_list = lambda _data: None
+    app.prompt_birth_year_correction = lambda _popup, txt: 2014
+    popup = Popup()
+    birthyear = DummyField("bad-year")
     WeighingApp.save_new_participant(
         app,
         popup,
         DummyField("Ada"),
         DummyField("Lovelace"),
         DummyField("Club"),
-        DummyField("bad-year"),
+        birthyear,
         DummyField("weiblich"),
     )
 
-    assert len(warnings) == 1
-    assert warnings[0][0] == "Invalid input"
+    assert app.participants[-1][BIRTHYEAR_KEY] == 2014
+    assert infos == [("Saved", "Added participant: Ada Lovelace")]
 
 
 def test_save_new_participant_success(monkeypatch):

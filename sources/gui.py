@@ -681,8 +681,7 @@ class WeighingApp(tk.Tk):
 
     def show_details(self, p: Dict):
         """Populates the detail view with the selected participant's data."""
-        if self.search_var.get().strip():
-            self.search_var.set("")
+
         
         # Name Parsing (Handle fallback logic for simplified mock data)
         full_name = str(p.get('Name', 'Unknown'))

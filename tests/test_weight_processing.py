@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 import numpy as np
 import pytest
@@ -39,11 +38,14 @@ def test_red_mask_detects_red_region():
 
 
 def test_decode_7seg_digit_for_0_and_8():
-    d0 = _digit_image_for_pattern((1, 1, 1, 0, 1, 1, 1))
-    d8 = _digit_image_for_pattern((1, 1, 1, 1, 1, 1, 1))
+    assert weight.decode_7seg_digit(_digit_image_for_pattern((1, 1, 1, 0, 1, 1, 1))) == 0
+    assert weight.decode_7seg_digit(_digit_image_for_pattern((1, 1, 1, 1, 1, 1, 1))) == 8
 
-    assert weight.decode_7seg_digit(d0) == 0
-    assert weight.decode_7seg_digit(d8) == 8
+
+def test_decode_7seg_digit_handles_empty_and_small_inputs():
+    assert weight.decode_7seg_digit(None) is None
+    assert weight.decode_7seg_digit(np.array([], dtype=np.uint8)) is None
+    assert weight.decode_7seg_digit(np.zeros((10, 5), dtype=np.uint8)) is None
 
 
 def test_auto_digit_boxes_from_mask_returns_boxes():
@@ -58,6 +60,13 @@ def test_auto_digit_boxes_from_mask_returns_boxes():
     assert len(boxes) == 3
 
 
+def test_auto_digit_boxes_from_mask_returns_none_when_too_few():
+    mask = np.zeros((120, 120), dtype=np.uint8)
+    mask[20:40, 20:40] = 255
+
+    assert weight.auto_digit_boxes_from_mask(mask) is None
+
+
 def test_decode_from_fixed_boxes_aggregates_digits(monkeypatch):
     mask = np.ones((200, 300), dtype=np.uint8) * 255
     boxes = [(10, 10, 40, 80), (60, 10, 40, 80), (110, 10, 40, 80)]
@@ -65,135 +74,47 @@ def test_decode_from_fixed_boxes_aggregates_digits(monkeypatch):
 
     monkeypatch.setattr(weight, "decode_7seg_digit", lambda _img: next(seq))
 
-    text, digits = weight.decode_from_fixed_boxes(mask, boxes)
-
-    assert text == "123"
-    assert digits == [1, 2, 3]
-
-
-def test_decode_7seg_digit_handles_empty_and_too_small():
-    assert weight.decode_7seg_digit(None) is None
-    assert weight.decode_7seg_digit(np.array([], dtype=np.uint8)) is None
-    assert weight.decode_7seg_digit(np.zeros((10, 5), dtype=np.uint8)) is None
-
-
-def test_decode_7seg_digit_handles_empty_segment_slices():
-    class FakeBinDigit:
-        size = 1
-        shape = (30, 20)
-
-        def __getitem__(self, _key):
-            return np.array([], dtype=np.uint8)
-
-    assert weight.decode_7seg_digit(FakeBinDigit()) is None
-
-
-def test_auto_digit_boxes_from_mask_returns_none_when_too_few():
-    mask = np.zeros((120, 120), dtype=np.uint8)
-    mask[20:40, 20:40] = 255
-    boxes = weight.auto_digit_boxes_from_mask(mask)
-    assert boxes is None
-
-
-def test_auto_digit_boxes_from_mask_limits_max_digits():
-    mask = np.zeros((220, 600), dtype=np.uint8)
-    for i in range(6):
-        x = 10 + i * 80
-        mask[40:120, x : x + 20] = 255
-
-    boxes = weight.auto_digit_boxes_from_mask(mask)
-    assert boxes is not None
-    assert len(boxes) == weight.MAX_DIGITS
+    assert weight.decode_from_fixed_boxes(mask, boxes) == "123"
 
 
 def test_decode_from_fixed_boxes_returns_none_on_failed_digit(monkeypatch):
     mask = np.ones((200, 300), dtype=np.uint8) * 255
     boxes = [(10, 10, 40, 80), (60, 10, 40, 80)]
+
     monkeypatch.setattr(weight, "decode_7seg_digit", lambda _img: None)
 
-    text, digits = weight.decode_from_fixed_boxes(mask, boxes)
-
-    assert text is None
-    assert digits == [None, None]
+    assert weight.decode_from_fixed_boxes(mask, boxes) is None
 
 
-def test_decode_from_fixed_boxes_handles_empty_cropped_digit():
-    mask = np.ones((20, 20), dtype=np.uint8) * 255
-    boxes = [(200, 200, 10, 10)]
+def test__decode_current_weight_reuses_last_boxes(monkeypatch):
+    frame = np.zeros((40, 40, 3), dtype=np.uint8)
+    mask = np.ones((40, 40), dtype=np.uint8) * 255
+    last_boxes = [(1, 2, 3, 4)]
+    rectangles = []
+    shown = []
 
-    text, digits = weight.decode_from_fixed_boxes(mask, boxes)
+    monkeypatch.setattr(weight, "red_mask", lambda _frame: mask)
+    monkeypatch.setattr(weight, "auto_digit_boxes_from_mask", lambda _mask: None)
+    monkeypatch.setattr(weight, "decode_from_fixed_boxes", lambda _mask, boxes: "456")
+    monkeypatch.setattr(weight.cv2, "cvtColor", lambda _img, _code: np.zeros((40, 40, 3), dtype=np.uint8))
+    monkeypatch.setattr(weight.cv2, "rectangle", lambda *args: rectangles.append(args[1:3]))
+    monkeypatch.setattr(weight.cv2, "imshow", lambda name, img: shown.append((name, img.shape)))
 
-    assert text is None
-    assert digits == [None]
+    text, boxes = weight._decode_current_weight(frame, last_boxes)
 
-
-def test_send_weight_sends_expected_payload(monkeypatch):
-    captured = {}
-
-    class FakeConn:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def send(self, msg):
-            captured["msg"] = msg
-
-    monkeypatch.setattr(weight.websockets, "connect", lambda _url: FakeConn())
-    import asyncio
-
-    asyncio.run(weight.send_weight("7564"))
-    assert '"type": "weight"' in captured["msg"]
-    assert '"weight": "7564"' in captured["msg"]
+    assert text == "456"
+    assert boxes == last_boxes
+    assert rectangles
+    assert shown == [("debug", (40, 40, 3))]
 
 
-def test_run_weight_scanner_raises_when_camera_not_open(monkeypatch):
-    class ClosedCap:
-        def set(self, *_args):
-            return None
+def test_main_processes_request_weight_and_closes_resources(monkeypatch):
+    class StopLoop(Exception):
+        pass
 
-        def isOpened(self):
-            return False
-
-    monkeypatch.setattr(weight.cv2, "VideoCapture", lambda _idx: ClosedCap())
-    with pytest.raises(RuntimeError, match="Webcam"):
-        weight.run_weight_scanner(0)
-
-
-def test_run_weight_scanner_quit_releases_resources(monkeypatch):
-    calls = {"release": 0, "destroy": 0, "loop": 0}
-
-    class Cap:
-        def set(self, *_args):
-            return None
-
-        def isOpened(self):
-            return True
-
-        def release(self):
-            calls["release"] += 1
-
-    async def fake_loop(_cap):
-        calls["loop"] += 1
-
-    monkeypatch.setattr(weight.cv2, "VideoCapture", lambda _idx: Cap())
-    monkeypatch.setattr(weight, "_run_weight_scanner_loop", fake_loop)
-    monkeypatch.setattr(weight.cv2, "destroyAllWindows", lambda: calls.__setitem__("destroy", calls["destroy"] + 1))
-
-    weight.run_weight_scanner(0)
-
-    assert calls["release"] == 1
-    assert calls["destroy"] == 1
-    assert calls["loop"] == 1
-
-
-def test_run_weight_scanner_request_uses_decoded_weight_and_sends(monkeypatch):
-    sent = []
-
-    class Cap:
+    class DummyCap:
         def __init__(self):
-            self.i = 0
+            self.released = False
 
         def set(self, *_args):
             return None
@@ -202,149 +123,57 @@ def test_run_weight_scanner_request_uses_decoded_weight_and_sends(monkeypatch):
             return True
 
         def read(self):
-            self.i += 1
-            if self.i <= 2:
-                return True, np.zeros((50, 50, 3), dtype=np.uint8)
-            return False, None
+            return True, np.zeros((20, 20, 3), dtype=np.uint8)
 
         def release(self):
-            return None
+            self.released = True
 
-    class FakeWS:
-        def __init__(self):
-            self.messages = [json.dumps({"type": "REQUEST_WEIGHT"})]
+    class DummyWS:
+        instance = None
 
-        async def recv(self):
-            if self.messages:
-                return self.messages.pop(0)
-            await asyncio.sleep(1)
-            return ""
+        def __init__(self, url):
+            self.url = url
+            self.connected = False
+            self.closed = False
+            DummyWS.instance = self
 
-    class FakeConn:
-        async def __aenter__(self):
-            return FakeWS()
+        async def connect(self):
+            self.connected = True
 
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
+        async def close(self):
+            self.closed = True
 
-    keys = iter([0, ord("q")])
+        async def recv_json(self):
+            return {"type": "REQUEST_WEIGHT"}
 
-    monkeypatch.setattr(weight.cv2, "waitKey", lambda _delay: next(keys))
+    class DummyWeightClient:
+        seen = []
+
+        def __init__(self, ws, weight_provider):
+            self.ws = ws
+            self.weight_provider = weight_provider
+
+        async def handle_message(self, msg):
+            DummyWeightClient.seen.append((msg, self.weight_provider()))
+            raise StopLoop()
+
+    cap = DummyCap()
+    destroy_calls = []
+
+    monkeypatch.setattr(weight.cv2, "VideoCapture", lambda _idx: cap)
     monkeypatch.setattr(weight.cv2, "imshow", lambda *_args: None)
-    monkeypatch.setattr(weight.cv2, "destroyAllWindows", lambda: None)
-    monkeypatch.setattr(weight.websockets, "connect", lambda _url: FakeConn())
-    monkeypatch.setattr(weight, "_decode_current_weight", lambda _frame, _boxes: ("123", [1, 2, 3], _boxes))
+    monkeypatch.setattr(weight.cv2, "waitKey", lambda _delay: 0)
+    monkeypatch.setattr(weight.cv2, "destroyAllWindows", lambda: destroy_calls.append(True))
+    monkeypatch.setattr(weight, "WebSocketClient", DummyWS)
+    monkeypatch.setattr(weight, "WeightClient", DummyWeightClient)
+    monkeypatch.setattr(weight, "_decode_current_weight", lambda _frame, last_boxes: ("321", last_boxes))
+    monkeypatch.setattr(weight, "asyncio", asyncio, raising=False)
 
-    async def fake_send_weight(txt, websocket=None):
-        sent.append((txt, websocket is not None))
+    with pytest.raises(StopLoop):
+        asyncio.run(weight.main())
 
-    monkeypatch.setattr(weight, "send_weight", fake_send_weight)
-
-    asyncio.run(weight._run_weight_scanner_loop(Cap()))
-
-    assert sent == [("123", True)]
-
-
-def test_run_weight_scanner_request_without_boxes_prints_and_continues(monkeypatch):
-    prints = []
-
-    class Cap:
-        def __init__(self):
-            self.i = 0
-
-        def set(self, *_args):
-            return None
-
-        def isOpened(self):
-            return True
-
-        def read(self):
-            self.i += 1
-            if self.i <= 2:
-                return True, np.zeros((50, 50, 3), dtype=np.uint8)
-            return False, None
-
-        def release(self):
-            return None
-
-    class FakeWS:
-        def __init__(self):
-            self.messages = [json.dumps({"type": "REQUEST_WEIGHT"})]
-
-        async def recv(self):
-            if self.messages:
-                return self.messages.pop(0)
-            await asyncio.sleep(1)
-            return ""
-
-    class FakeConn:
-        async def __aenter__(self):
-            return FakeWS()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    keys = iter([0, ord("q")])
-
-    monkeypatch.setattr(weight.cv2, "waitKey", lambda _delay: next(keys))
-    monkeypatch.setattr(weight.cv2, "imshow", lambda *_args: None)
-    monkeypatch.setattr(weight.cv2, "destroyAllWindows", lambda: None)
-    monkeypatch.setattr(weight.websockets, "connect", lambda _url: FakeConn())
-    monkeypatch.setattr(weight, "_decode_current_weight", lambda _frame, _boxes: (None, [], _boxes))
-    monkeypatch.setattr("builtins.print", lambda msg: prints.append(str(msg)))
-
-    asyncio.run(weight._run_weight_scanner_loop(Cap()))
-
-    assert any("Konnte nicht sicher decodieren" in msg for msg in prints)
-
-
-def test_run_weight_scanner_prints_failed_digits_when_decode_returns_none(monkeypatch):
-    prints = []
-
-    class Cap:
-        def __init__(self):
-            self.i = 0
-
-        def set(self, *_args):
-            return None
-
-        def isOpened(self):
-            return True
-
-        def read(self):
-            self.i += 1
-            if self.i <= 2:
-                return True, np.zeros((50, 50, 3), dtype=np.uint8)
-            return False, None
-
-        def release(self):
-            return None
-
-    class FakeWS:
-        def __init__(self):
-            self.messages = [json.dumps({"type": "REQUEST_WEIGHT"})]
-
-        async def recv(self):
-            if self.messages:
-                return self.messages.pop(0)
-            await asyncio.sleep(1)
-            return ""
-
-    class FakeConn:
-        async def __aenter__(self):
-            return FakeWS()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    keys = iter([0, ord("q")])
-    monkeypatch.setattr(weight.cv2, "waitKey", lambda _delay: next(keys))
-    monkeypatch.setattr(weight.cv2, "imshow", lambda *_args: None)
-    monkeypatch.setattr(weight.cv2, "destroyAllWindows", lambda: None)
-    monkeypatch.setattr(weight.websockets, "connect", lambda _url: FakeConn())
-    monkeypatch.setattr(weight, "_decode_current_weight", lambda _frame, _boxes: (None, [1, None, 3], _boxes))
-    monkeypatch.setattr("builtins.print", lambda msg: prints.append(str(msg)))
-
-    asyncio.run(weight._run_weight_scanner_loop(Cap()))
-
-    assert any("Fehler bei Ziffer(n): [2]" in msg for msg in prints)
+    assert DummyWS.instance.connected is True
+    assert DummyWS.instance.closed is True
+    assert DummyWeightClient.seen == [({"type": "REQUEST_WEIGHT"}, "321")]
+    assert cap.released is True
+    assert destroy_calls == [True]

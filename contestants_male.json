@@ -7,7 +7,7 @@
     "Birthyear": 2018,
     "Club": "JC Sakura Berlin",
     "Association": "JV Berlin",
-    "Weight": 0.0,
+    "Weight": Infinity,
     "Valid": false,
     "Gender": "m",
     "Paid": true
@@ -4890,14 +4890,14 @@
   {
     "ID": 751,
     "Firstname": "Hadlik",
-    "Lastname": "Merlin",
-    "Name": "Hadlik Merlin",
-    "Birthyear": 2002,
+    "Lastname": "Merlin+",
+    "Name": "Hadlik Merlin+",
+    "Birthyear": 1906,
     "Club": "JC Leipzig",
     "Association": "JV Sachsen",
     "Weight": 0.0,
     "Valid": false,
-    "Gender": "male",
+    "Gender": "m",
     "Paid": true
   },
   {
@@ -4907,6 +4907,18 @@
     "Name": "Wolfgang Jeblick",
     "Birthyear": 1997,
     "Club": null,
+    "Weight": 0.0,
+    "Valid": false,
+    "Gender": "m",
+    "Paid": false
+  },
+  {
+    "ID": 753,
+    "Firstname": "Merlin",
+    "Lastname": "Hladikiii",
+    "Name": "Merlin Hladikiii",
+    "Birthyear": 1998,
+    "Club": "Deidesheim",
     "Weight": 0.0,
     "Valid": false,
     "Gender": "m",
