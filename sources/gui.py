@@ -140,6 +140,24 @@ class WeighingApp(tk.Tk):
         )
         self.btn_add.pack(side=tk.RIGHT, padx=5)
 
+        delete_btn_opts = dict(btn_opts)
+        delete_btn_opts.update(
+            {
+                "bg": THEME["error"],
+                "fg": "white",
+                "activebackground": THEME["error"],
+                "activeforeground": "white",
+            }
+        )
+        self.btn_delete = tk.Button(
+            btn_container,
+            text="-",
+            command=self.delete_selected_participant,
+            width=18,
+            **delete_btn_opts,
+        )
+        self.btn_delete.pack(side=tk.RIGHT, padx=5)
+
         self.duplicate_warning_frame = tk.Frame(
             self.main_container,
             bg=THEME["error"],
@@ -460,7 +478,7 @@ class WeighingApp(tk.Tk):
         if popup and popup.winfo_exists():
             self.fill_add_participant_from_qr(qr_data)
             return
-        self.apply_qr_search(qr_data.get("name", ""))
+        self.apply_qr_match(qr_data)
         
     
     def get_filtered_participants(self, query: str) -> List[Dict[str, Any]]:
@@ -490,6 +508,141 @@ class WeighingApp(tk.Tk):
         self.listbox.activate(0)
         self.listbox.see(0)
         self.show_details(filtered[0])
+
+    @staticmethod
+    def _normalize_birth_year(value: Any) -> Optional[int]:
+        txt = str(value or "").strip()
+        if txt.isdigit():
+            return int(txt)
+        return None
+
+    @staticmethod
+    def _qr_is_valid(exp_timestamp: Any) -> bool:
+        try:
+            exp = int(exp_timestamp)
+        except Exception:
+            return False
+        return datetime.now().timestamp() <= exp
+
+    def apply_qr_match(self, qr_data: Dict[str, Any]):
+        """Matches QR data by exact full identity first, then falls back to search filter."""
+        qr_first = str(qr_data.get("first_name") or "").strip().lower()
+        qr_last = str(qr_data.get("last_name") or "").strip().lower()
+        qr_name = str(qr_data.get("name") or "").strip()
+        qr_birth_year = self._normalize_birth_year(qr_data.get("birth_year"))
+
+        exact_matches = []
+        for p in self.participants:
+            first = str(p.get("Firstname") or "").strip().lower()
+            last = str(p.get("Lastname") or "").strip().lower()
+            birth_year = self._normalize_birth_year(p.get(BIRTHYEAR_KEY, p.get("BirthYear")))
+            if first == qr_first and last == qr_last and birth_year == qr_birth_year:
+                exact_matches.append(p)
+
+        if exact_matches:
+            qr_is_valid = self._qr_is_valid(qr_data.get("exp_timestamp"))
+            exact_matches[0][VALID_KEY] = qr_is_valid
+            self.update_list(exact_matches)
+            if len(exact_matches) > 1:
+                self.show_duplicate_warning()
+            else:
+                self.hide_duplicate_warning()
+
+            self.selected_participant = exact_matches[0]
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(0)
+            self.listbox.activate(0)
+            self.listbox.see(0)
+            self.show_details(exact_matches[0])
+            return
+
+        filtered = self.get_filtered_participants(qr_name)
+        self.update_list(filtered)
+        self.listbox.selection_clear(0, tk.END)
+        self.clear_participant_details()
+        if len(filtered) > 1:
+            self.show_duplicate_warning()
+        else:
+            self.hide_duplicate_warning()
+        qr_status = "gültig" if self._qr_is_valid(qr_data.get("exp_timestamp")) else "abgelaufen"
+        self.show_qr_mismatch_warning(qr_status)
+
+    def show_qr_mismatch_warning(self, qr_status: str):
+        """Shows styled warning popup for QR mismatches."""
+        popup = tk.Toplevel(self)
+        popup.title("Kein 100%-Treffer")
+        popup.configure(bg=THEME["bg"])
+        popup.resizable(False, False)
+        popup.transient(self)
+        popup.grab_set()
+
+        popup_w = 520
+        popup_h = 260
+        popup.update_idletasks()
+        try:
+            self.update_idletasks()
+            root_x = self.winfo_rootx()
+            root_y = self.winfo_rooty()
+            root_w = self.winfo_width()
+            root_h = self.winfo_height()
+            x = root_x + (root_w - popup_w) // 2
+            y = root_y + (root_h - popup_h) // 2
+        except Exception:
+            screen_w = popup.winfo_screenwidth()
+            screen_h = popup.winfo_screenheight()
+            x = (screen_w - popup_w) // 2
+            y = (screen_h - popup_h) // 2
+        popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
+
+        is_valid = str(qr_status).strip().lower() == "gültig"
+        status_color = THEME["success"] if is_valid else THEME["error"]
+
+        tk.Label(
+            popup,
+            text="keinen vollständig übereinstimmenden Daten gefunden.",
+            bg=THEME["bg"],
+            fg=THEME["fg"],
+            font=("Arial", 12, "bold"),
+            wraplength=470,
+            justify="center",
+        ).pack(pady=(24, 10), padx=20)
+
+        status_frame = tk.Frame(popup, bg=THEME["bg"])
+        status_frame.pack(pady=(0, 12))
+        tk.Label(
+            status_frame,
+            text="QR Code ist ",
+            bg=THEME["bg"],
+            fg=THEME["fg"],
+            font=("Arial", 14),
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            status_frame,
+            text=qr_status,
+            bg=THEME["bg"],
+            fg=status_color,
+            font=("Arial", 20, "bold"),
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            popup,
+            text="Bitte manuel ändern.",
+            bg=THEME["bg"],
+            fg=THEME["fg"],
+            font=("Arial", 11),
+        ).pack(pady=(0, 18))
+
+        tk.Button(
+            popup,
+            text="OK",
+            command=popup.destroy,
+            bg=THEME["input_bg"],
+            fg="white",
+            activebackground=THEME["input_bg"],
+            activeforeground="white",
+            font=("Arial", 10, "bold"),
+            width=12,
+        ).pack()
 
     def search_participants(self, query: str) -> list[dict]:
         q = (query or "").lower().strip()
@@ -836,6 +989,36 @@ class WeighingApp(tk.Tk):
             messagebox.showinfo("Saved", f"Updated: {full_name}\nWeight: {weight} kg")
         except Exception as e:
             messagebox.showerror("Error", f"Could not save data: {e}")
+
+    def delete_selected_participant(self):
+        """Deletes currently selected participant after explicit confirmation."""
+        p = self.selected_participant
+        if not p:
+            messagebox.showwarning("Keine Auswahl", "Bitte zuerst einen Teilnehmer auswählen.")
+            return
+
+        first = str(p.get("Firstname") or "").strip()
+        last = str(p.get("Lastname") or "").strip()
+        name = f"{first} {last}".strip() or str(p.get("Name") or "Unbekannt").strip()
+
+        confirmed = messagebox.askyesno(
+            "Teilnehmer löschen",
+            f"Willst du wirklich {name} unwiderruflich löschen?",
+        )
+        if not confirmed:
+            return
+
+        try:
+            self.participants = [entry for entry in self.participants if entry is not p]
+            self.search_var.set("")
+            self.update_list(self.participants)
+            self.listbox.selection_clear(0, tk.END)
+            self.clear_participant_details()
+            self.hide_duplicate_warning()
+            self.save_data()
+            messagebox.showinfo("Gelöscht", f"{name} wurde gelöscht.")
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Teilnehmer konnte nicht gelöscht werden: {e}")
 
     def open_add_participant_window(self):
         """Opens a dialog to manually create a new participant."""
