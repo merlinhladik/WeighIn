@@ -10,17 +10,11 @@ else
   exit 1
 fi
 
-start_terminal() {
-  local title="$1"
-  local cmd="$2"
+source "$VENV_DIR/bin/activate"
+cd "$SCRIPT_DIR"
 
-    qterminal -d -e bash -lc "source '$VENV_DIR/bin/activate' && cd '$SCRIPT_DIR' && $cmd; exec bash" &
-}
+mkdir -p "$SOURCE_DIR/logs"
 
-start_terminal "gui.py" "python sources/gui.py"
-start_terminal "real_scanner.py" "sudo \"$VENV_DIR/bin/python\" sources/real_scanner.py"
-sleep 2
-start_terminal "weight.py" "python sources/weight.py"
-
-
-echo "3 Terminals wurden gestartet."
+"$VENV_DIR/bin/python" sources/gui.py > "$SOURCE_DIR/logs/gui.log" 2>&1 &
+sudo "$VENV_DIR/bin/python" sources/real_scanner.py > "$SOURCE_DIR/logs/qr.log" 2>&1 &
+"$VENV_DIR/bin/python" sources/weight.py > "$SOURCE_DIR/logs/weight.log" 2>&1 & 

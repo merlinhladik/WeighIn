@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from gui import BIRTHDATE_KEY, DEFAULT_JSON_FILE, PAID_KEY, VALID_KEY, WEIGHT_KEY, WeighingApp
+from gui import BIRTHYEAR_KEY, PAID_KEY, VALID_KEY, WEIGHT_KEY, WeighingApp
 
 
 def test_init_sets_defaults_and_calls_bootstrap_steps(monkeypatch):
@@ -21,6 +21,11 @@ def test_init_sets_defaults_and_calls_bootstrap_steps(monkeypatch):
     monkeypatch.setattr(WeighingApp, "load_settings", lambda self: calls.append("load_settings"))
     monkeypatch.setattr(WeighingApp, "load_data", lambda self: calls.append("load_data"))
     monkeypatch.setattr(
+        WeighingApp,
+        "prompt_for_data_source_selection",
+        lambda self: calls.append("prompt_for_data_source_selection"),
+    )
+    monkeypatch.setattr(
         WeighingApp, "start_websocket_server", lambda self: calls.append("start_websocket_server")
     )
 
@@ -29,14 +34,20 @@ def test_init_sets_defaults_and_calls_bootstrap_steps(monkeypatch):
     assert app.participants == []
     assert app.selected_participant is None
     assert app.pending_received_weight is None
-    assert app.weight_decimal_places == 1
+    assert app.weight_decimal_places == 0
     assert app.weight_popup is None
     assert app.ws_loop is None
     assert app.ws_thread is None
     assert app.ws_server is None
     assert app.ws_clients == set()
 
-    assert calls == ["create_layout", "load_settings", "load_data", "start_websocket_server"]
+    assert calls == [
+        "create_layout",
+        "load_settings",
+        "load_data",
+        "prompt_for_data_source_selection",
+        "start_websocket_server",
+    ]
     assert len(protocol_calls) == 1
     assert protocol_calls[0][0] == "WM_DELETE_WINDOW"
     assert callable(protocol_calls[0][1])
@@ -51,40 +62,12 @@ def test_to_bool_variants():
     assert WeighingApp.to_bool(None) is False
 
 
-def test_get_birth_year_from_date():
-    assert WeighingApp.get_birth_year_from_date("01.12.2010") == 2010
-    assert WeighingApp.get_birth_year_from_date("32.12.2010") is None
-    assert WeighingApp.get_birth_year_from_date("01.13.2010") is None
-    assert WeighingApp.get_birth_year_from_date("01.12.2010abc") is None
-    assert WeighingApp.get_birth_year_from_date("abc01.12.2010") is None
-    assert WeighingApp.get_birth_year_from_date("01.12.20a0") is None
-    assert WeighingApp.get_birth_year_from_date("01.12.20") is None
-    assert WeighingApp.get_birth_year_from_date("01.12.201") is None
-    assert WeighingApp.get_birth_year_from_date("01.12.20100") is None
-    assert WeighingApp.get_birth_year_from_date("01-12-2010") is None
-    assert WeighingApp.get_birth_year_from_date("2010.12.01") is None
-    assert WeighingApp.get_birth_year_from_date("2010-12-01") is None
-    assert WeighingApp.get_birth_year_from_date("abc") is None
-
-
-def test_normalize_participant_legacy_keys():
-    participant = {
-        "Vorname": "Max",
-        "Nachname": "Muster",
-        "Gewicht": "75.4",
-        "Gueltig": "yes",
-        "Paid": "1",
-        "Birthdate": "01.01.2010",
-    }
-
-    out = WeighingApp.normalize_participant(participant)
-
-    assert out[WEIGHT_KEY] == 75.4
-    assert out[VALID_KEY] is True
-    assert out[PAID_KEY] is True
-    assert out[BIRTHDATE_KEY] == "01.01.2010"
-    assert "Gewicht" not in out
-    assert "Birthdate" not in out
+def test_parse_birth_year():
+    assert WeighingApp.parse_birth_year("2010") == 2010
+    assert WeighingApp.parse_birth_year(" 2010 ") == 2010
+    assert WeighingApp.parse_birth_year("20a0") is None
+    assert WeighingApp.parse_birth_year("100") is None
+    assert WeighingApp.parse_birth_year("abc") is None
 
 
 def test_format_scale_weight():
@@ -94,10 +77,9 @@ def test_format_scale_weight():
 
 def test_filter_qr_alias_fields():
     dummy = object()
-    out = WeighingApp.filter_qr(dummy, {"first": "Ada", "last": "Lovelace", "birthdat": "10.12.1815", "exp_timestamp": 123})
+    out = WeighingApp.filter_qr(dummy, {"first": "Ada", "last": "Lovelace", "exp_timestamp": 123})
 
     assert out["name"] == "Ada Lovelace"
-    assert out["birth_date"] == "10.12.1815"
     assert out["exp_timestamp"] == 123
 
 
@@ -107,23 +89,17 @@ def test_filter_qr_non_dict_returns_empty_payload():
         "name": "",
         "first_name": "",
         "last_name": "",
-        "birth_date": None,
         "exp_timestamp": None,
     }
 
 
-def test_get_birthdate_text_prefers_full_date():
-    participant = {BIRTHDATE_KEY: "05.06.2014", "Geburtsjahr": 2013}
-    assert WeighingApp.get_birthdate_text(participant) == "05.06.2014"
+def test_get_birth_year_text_uses_year():
+    participant = {BIRTHYEAR_KEY: 2013}
+    assert WeighingApp.get_birth_year_text(participant) == "2013"
 
 
-def test_get_birthdate_text_uses_year_fallback():
-    participant = {"Geburtsjahr": 2013}
-    assert WeighingApp.get_birthdate_text(participant) == "01.01.2013"
-
-
-def test_get_birthdate_text_returns_placeholder():
-    assert WeighingApp.get_birthdate_text({}) == "---"
+def test_get_birth_year_text_returns_placeholder():
+    assert WeighingApp.get_birth_year_text({}) == "---"
 
 
 def test_fix_mojibake_text_keeps_value_if_repair_fails():
@@ -138,15 +114,6 @@ def test_fix_mojibake_text_ignores_non_string():
 def test_format_scale_weight_falls_back_for_invalid_places():
     dummy = type("Dummy", (), {"weight_decimal_places": 9})()
     assert WeighingApp.format_scale_weight(dummy, 7564) == "756.4"
-
-
-def test_normalize_participant_invalid_weight_defaults_to_zero():
-    participant = {"Gewicht": "abc", "Gueltig": "no", "Paid": "0", "Birthdate": None}
-    out = WeighingApp.normalize_participant(participant)
-    assert out[WEIGHT_KEY] == 0.0
-    assert out[VALID_KEY] is False
-    assert out[PAID_KEY] is False
-    assert out[BIRTHDATE_KEY] == ""
 
 
 def test_get_filtered_participants_by_name_and_club():
@@ -168,9 +135,9 @@ def test_get_filtered_participants_by_name_and_club():
 def test_get_exact_name_matches_supports_fallback_name():
     app = type("Dummy", (), {})()
     app.participants = [
-        {"Vorname": "Ada", "Nachname": "Lovelace"},
+        {"Firstname": "Ada", "Lastname": "Lovelace"},
         {"Name": "Ada Lovelace"},
-        {"Vorname": "Max", "Nachname": "Muster"},
+        {"Firstname": "Max", "Lastname": "Muster"},
     ]
 
     out = WeighingApp.get_exact_name_matches(app, "Ada   Lovelace")
@@ -179,7 +146,7 @@ def test_get_exact_name_matches_supports_fallback_name():
 
 def test_get_selected_full_name_with_and_without_selection():
     app = type("Dummy", (), {})()
-    app.selected_participant = {"Vorname": "Ada", "Nachname": "Lovelace"}
+    app.selected_participant = {"Firstname": "Ada", "Lastname": "Lovelace"}
     assert WeighingApp.get_selected_full_name(app) == "Lovelace, Ada"
 
     app.selected_participant = None
@@ -226,22 +193,20 @@ def test_save_weight_success_updates_participant_and_sends_payload(monkeypatch):
     app = type("Dummy", (), {})()
     app.selected_participant = {
         "ID": 7,
-        "Vorname": "Old",
-        "Nachname": "Name",
+        "Firstname": "Old",
+        "Lastname": "Name",
         "Name": "Old Name",
-        "Gewicht": 60,
-        "Gueltig": True,
+        "Weight": 60,
+        "Valid": True,
         "Paid": False,
     }
     app.participants = [app.selected_participant]
     app.weight_var = DummyField("75.4")
     app.val_prename = DummyField("Ada")
     app.val_surname = DummyField("Lovelace")
-    app.val_birthdate = DummyField("10.12.1815")
+    app.val_birthyear = DummyField("2015")
     app.valid_var = DummyField("gueltig")
     app.paid_var = DummyField("Zahlung erfolgt")
-    app.get_birth_year_from_date = lambda _birthdate: 1815
-
     calls = {"save_data": 0, "update_list": [], "payloads": []}
     app.save_data = lambda: calls.__setitem__("save_data", calls["save_data"] + 1)
     app.update_list = lambda data: calls["update_list"].append(data)
@@ -251,16 +216,14 @@ def test_save_weight_success_updates_participant_and_sends_payload(monkeypatch):
 
     p = app.selected_participant
     assert p[WEIGHT_KEY] == 75.4
-    assert p["Vorname"] == "Ada"
-    assert p["Nachname"] == "Lovelace"
+    assert p["Firstname"] == "Ada"
+    assert p["Lastname"] == "Lovelace"
     assert p["Name"] == "Ada Lovelace"
     assert p[VALID_KEY] is True
     assert p[PAID_KEY] is True
-    assert p[BIRTHDATE_KEY] == "10.12.1815"
-    assert p["Geburtsjahr"] == 1815
+    assert p[BIRTHYEAR_KEY] == 2015
     assert "Gewicht" not in p
     assert "Gueltig" not in p
-    assert "Paid" not in p
 
     assert calls["save_data"] == 1
     assert calls["update_list"] == [app.participants]
@@ -287,10 +250,9 @@ def test_save_weight_handles_save_exception(monkeypatch):
     app.weight_var = DummyField("70")
     app.val_prename = DummyField("Ada")
     app.val_surname = DummyField("Lovelace")
-    app.val_birthdate = DummyField("10.12.1815")
+    app.val_birthyear = DummyField("2015")
     app.valid_var = DummyField("gueltig")
     app.paid_var = DummyField("Zahlung erfolgt")
-    app.get_birth_year_from_date = lambda _birthdate: 1815
     app.save_data = lambda: (_ for _ in ()).throw(RuntimeError("disk full"))
     app.update_list = lambda _data: None
     app.send_ws_payload = lambda _payload: None
@@ -436,8 +398,10 @@ def test_create_action_buttons_builds_expected_widgets(monkeypatch):
     assert "x" in texts
 
     assert hasattr(app, "btn_add")
-    assert app.btn_add.lift_called is True
-    assert len(app.btn_add.place_calls) == 1
+    assert app.btn_add.lift_called is False
+    assert len(app.btn_add.place_calls) == 0
+    assert app.btn_add.kwargs.get("width") == 18
+    assert app.btn_add.kwargs.get("height") == 2
     assert app.duplicate_warning_label.kwargs["text"] == "Achtung: Mehrere Personen gefunden"
     assert app.duplicate_warning_frame.place_forget_called is True
     assert len(created_labels) >= 1
@@ -478,8 +442,8 @@ def test_apply_qr_search_selects_first_match_and_shows_duplicate_warning():
             self.calls.append(("see", args))
 
     participants = [
-        {"ID": 1, "Name": "Ada Lovelace", "Vorname": "Ada", "Nachname": "Lovelace"},
-        {"ID": 2, "Name": "Ada Lovelace", "Vorname": "Ada", "Nachname": "Lovelace"},
+        {"ID": 1, "Name": "Ada Lovelace", "Firstname": "Ada", "Lastname": "Lovelace"},
+        {"ID": 2, "Name": "Ada Lovelace", "Firstname": "Ada", "Lastname": "Lovelace"},
     ]
 
     app = type("Dummy", (), {})()
@@ -510,12 +474,11 @@ def test_load_settings_defaults_when_file_missing(monkeypatch):
     app = type("Dummy", (), {})()
     app.weight_decimal_places = 3
     app.data_file_path = "x"
-    monkeypatch.setattr("gui.os.path.exists", lambda _path: False)
 
     WeighingApp.load_settings(app)
 
-    assert app.weight_decimal_places == 1
-    assert app.data_file_path == DEFAULT_JSON_FILE
+    assert app.weight_decimal_places == 0
+    assert app.data_file_path == ""
 
 
 def test_load_settings_reads_valid_values(monkeypatch):
@@ -523,43 +486,21 @@ def test_load_settings_reads_valid_values(monkeypatch):
     app.weight_decimal_places = 1
     app.data_file_path = "old.json"
 
-    monkeypatch.setattr("gui.os.path.exists", lambda _path: True)
-    monkeypatch.setattr(
-        "gui.json.load",
-        lambda _f: {"weight_decimal_places": "2", "data_file_path": "new.json"},
-    )
-    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: _OpenStub())
-
     WeighingApp.load_settings(app)
 
-    assert app.weight_decimal_places == 2
-    assert app.data_file_path == "new.json"
+    assert app.weight_decimal_places == 0
+    assert app.data_file_path == ""
 
 
 def test_load_settings_ignores_invalid_values(monkeypatch):
     app = type("Dummy", (), {})()
-    app.weight_decimal_places = 0
+    app.weight_decimal_places = 2
     app.data_file_path = "old.json"
-
-    monkeypatch.setattr("gui.os.path.exists", lambda _path: True)
-    monkeypatch.setattr(
-        "gui.json.load",
-        lambda _f: {"weight_decimal_places": 9, "data_file_path": "   "},
-    )
-    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: _OpenStub())
 
     WeighingApp.load_settings(app)
 
-    assert app.weight_decimal_places == 1
-    assert app.data_file_path == DEFAULT_JSON_FILE
-
-
-class _OpenStub:
-    def __enter__(self):
-        return object()
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
+    assert app.weight_decimal_places == 0
+    assert app.data_file_path == ""
 
 
 def test_save_new_participant_warns_on_missing_names(monkeypatch):
@@ -572,15 +513,13 @@ def test_save_new_participant_warns_on_missing_names(monkeypatch):
     app = type("Dummy", (), {})()
     app.participants = []
     popup = type("Popup", (), {})()
-    app.get_birth_year_from_date = lambda _d: 2010
-
     WeighingApp.save_new_participant(
         app,
         popup,
         DummyField(""),
         DummyField(""),
         DummyField("Club"),
-        DummyField("01.01.2010"),
+        DummyField("2010"),
         DummyField("maennlich"),
     )
 
@@ -588,7 +527,7 @@ def test_save_new_participant_warns_on_missing_names(monkeypatch):
     assert warnings[0][0] == "Missing fields"
 
 
-def test_save_new_participant_warns_on_invalid_birthdate(monkeypatch):
+def test_save_new_participant_warns_on_invalid_birthyear(monkeypatch):
     warnings = []
     monkeypatch.setattr(
         "gui.messagebox.showwarning",
@@ -598,15 +537,13 @@ def test_save_new_participant_warns_on_invalid_birthdate(monkeypatch):
     app = type("Dummy", (), {})()
     app.participants = []
     popup = type("Popup", (), {})()
-    app.get_birth_year_from_date = lambda _d: None
-
     WeighingApp.save_new_participant(
         app,
         popup,
         DummyField("Ada"),
         DummyField("Lovelace"),
         DummyField("Club"),
-        DummyField("bad-date"),
+        DummyField("bad-year"),
         DummyField("weiblich"),
     )
 
@@ -627,7 +564,8 @@ def test_save_new_participant_success(monkeypatch):
 
     app = type("Dummy", (), {})()
     app.participants = [{"ID": "2"}, {"ID": 5}]
-    app.get_birth_year_from_date = lambda _d: 2010
+    app.add_participant_popup = None
+    app.add_participant_fields = {}
     calls = {"save_data": 0, "update_list": 0}
     app.save_data = lambda: calls.__setitem__("save_data", calls["save_data"] + 1)
     app.update_list = lambda _data: calls.__setitem__("update_list", calls["update_list"] + 1)
@@ -639,7 +577,7 @@ def test_save_new_participant_success(monkeypatch):
         DummyField("Ada"),
         DummyField("Lovelace"),
         DummyField("TOP"),
-        DummyField("01.01.2010"),
+        DummyField("2010"),
         DummyField("weiblich"),
     )
 
@@ -647,7 +585,7 @@ def test_save_new_participant_success(monkeypatch):
     new_p = app.participants[-1]
     assert new_p["ID"] == 6
     assert new_p["Name"] == "Ada Lovelace"
-    assert new_p["Geburtsjahr"] == 2010
+    assert new_p[BIRTHYEAR_KEY] == 2010
     assert new_p[WEIGHT_KEY] == 0.0
     assert new_p[VALID_KEY] is False
     assert new_p[PAID_KEY] is False
@@ -755,6 +693,9 @@ class DummyApp:
 
     def apply_qr_search(self, name):
         self.received_name = name
+
+    def handle_incoming_qr(self, qr_data):
+        self.apply_qr_search(qr_data.get("name", ""))
 
 
 def test_ws_handler_accepts_weight_and_qr():
