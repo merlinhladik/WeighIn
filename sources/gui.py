@@ -36,16 +36,16 @@ MIN_AGE_YEARS = 6
 MAX_AGE_YEARS = 120
 
 THEME = {
-    "bg": "#121212",        # Background: Very dark grey
-    "fg": "#FFFFFF",        # Foreground: White text
-    "accent": "#BB86FC",    # Accent: Purple
-    "secondary": "#2C2C2C", # Secondary: Lighter grey for panels/frames
-    "input_bg": "#333333",  # Input Fields: Dark Grey
-    "input_fg": "#FFFFFF",  # Input Text: White
-    "success": "#03DAC6",   # Success State: Teal
-    "error": "#CF6679",      # Error State: Red
-    "maennlich" : "#155FFF",
-    "weiblich" : "#FA60FF"
+    "bg": "#1e1e1e",        # VSCode Dark+ Background
+    "fg": "#f0f0f2",        # text
+    "accent": "#22AAF0",    # PO Palette: Fresh Sky
+    "secondary": "#252526", # VSCode Dark+ Sidebar/Secondary
+    "input_bg": "#3c3c3c",  # VSCode Dark+ Input Field
+    "input_fg": "#f0f0f2",  # text
+    "success": "#4CCD70",   # PO Palette: Emerald
+    "error": "#B7413F",     # Option 3: Earthy Brick Red
+    "maennlich" : "#22AAF0",# PO Palette: Fresh Sky
+    "weiblich" : "#E590E8"  # PO Palette: Violet
 }
 
 
@@ -106,8 +106,8 @@ class WeighingApp(tk.Tk):
         btn_container.pack(side=pack_side, fill=tk.X, pady=(20, 30))
 
         btn_opts = {
-            "bg": THEME["input_bg"], "fg": "white", 
-            "font": ("Arial", 10, "bold"), "bd": 1, 
+            "bg": THEME["input_bg"], "fg": "#f0f0f2", 
+            "font": ("Rubik", 10, "bold"), "bd": 1, 
             "relief": "flat", "height": 2, "cursor": "hand2"
         }
         
@@ -120,44 +120,46 @@ class WeighingApp(tk.Tk):
         # Settings
         tk.Button(btn_container, text="Einstellungen", command=self.open_settings_window, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
 
-        # Add participant button aligned with other action buttons.
+        # Configuration for the Add Participant button (Secondary Action)
         add_btn_opts = dict(btn_opts)
         add_btn_opts.update(
             {
-                "bg": "white",
+                "bg": "#f0f0f2",
                 "fg": "black",
-                "activebackground": "white",
+                "activebackground": "#f0f0f2",
                 "activeforeground": "black",
             }
         )
 
         self.btn_add = tk.Button(
             btn_container,
-            text="+",
+            text="Neuer Teilnehmer",
             command=self.open_add_participant_window,
             width=18,
             **add_btn_opts,
         )
         self.btn_add.pack(side=tk.RIGHT, padx=5)
 
+        # Configuration for the Delete Participant button (Destructive Action)
         delete_btn_opts = dict(btn_opts)
         delete_btn_opts.update(
             {
                 "bg": THEME["error"],
-                "fg": "white",
+                "fg": "#f0f0f2",
                 "activebackground": THEME["error"],
-                "activeforeground": "white",
+                "activeforeground": "#f0f0f2",
             }
         )
         self.btn_delete = tk.Button(
             btn_container,
-            text="-",
+            text="Teilnehmer löschen",
             command=self.delete_selected_participant,
             width=18,
             **delete_btn_opts,
         )
         self.btn_delete.pack(side=tk.RIGHT, padx=5)
 
+        # UI Element: Warning panel displayed when multiple participants match a search query.
         self.duplicate_warning_frame = tk.Frame(
             self.main_container,
             bg=THEME["error"],
@@ -168,8 +170,8 @@ class WeighingApp(tk.Tk):
             self.duplicate_warning_frame,
             text="Achtung: Mehrere Personen gefunden",
             bg=THEME["error"],
-            fg="white",
-            font=("Arial", 14, "bold"),
+            fg="#f0f0f2",
+            font=("Rubik", 14, "bold"),
             padx=20,
             pady=10,
         )
@@ -181,12 +183,12 @@ class WeighingApp(tk.Tk):
             text="x",
             command=self.hide_duplicate_warning,
             bg=THEME["error"],
-            fg="white",
+            fg="#f0f0f2",
             activebackground=THEME["error"],
-            activeforeground="white",
+            activeforeground="#f0f0f2",
             bd=0,
             relief="flat",
-            font=("Arial", 9, "bold"),
+            font=("Rubik", 9, "bold"),
             padx=8,
             pady=4,
             cursor="hand2",
@@ -202,7 +204,7 @@ class WeighingApp(tk.Tk):
             text=text,
             bg=THEME["bg"],
             fg=THEME["fg"],
-            font=("Arial", 12, "bold"),
+            font=("Rubik", 12, "bold"),
             anchor="w",
             width=LABEL_WIDTH,
         )
@@ -210,13 +212,13 @@ class WeighingApp(tk.Tk):
 
     def create_value(self, parent, text, r, c, pady=(5, 20)):
         """Creates a read-only value label at the specified grid position."""
-        lbl = tk.Label(parent, text=text, bg=THEME["bg"], fg="gray", font=("Arial", 16))
+        lbl = tk.Label(parent, text=text, bg=THEME["bg"], fg="gray", font=("Rubik", 16))
         lbl.grid(row=r, column=c, padx=20, pady=pady, sticky="n")
         return lbl
 
     def create_entry_value(self, parent, r, c):
         """Creates an editable entry field at the specified grid position."""
-        entry = tk.Entry(parent, bg=THEME["input_bg"], fg="white", font=("Arial", 14), justify="left", width=FIELD_WIDTH)
+        entry = tk.Entry(parent, bg=THEME["input_bg"], fg="#f0f0f2", font=("Rubik", 14), justify="left", width=FIELD_WIDTH)
         entry.grid(row=r, column=c, padx=20, pady=(5, 20), ipady=4, sticky="n")
         return entry
 
@@ -230,7 +232,7 @@ class WeighingApp(tk.Tk):
             activeforeground="black",
             highlightthickness=0,
             bd=0,
-            font=("Arial", 12, "bold"),
+            font=("Rubik", 12, "bold"),
             width=FIELD_WIDTH,
             anchor="w",
         )
@@ -239,7 +241,7 @@ class WeighingApp(tk.Tk):
             fg=THEME["fg"],
             activebackground=THEME["accent"],
             activeforeground="black",
-            font=("Arial", 11),
+            font=("Rubik", 11),
         )
         dropdown.grid(row=r, column=c, padx=20, pady=(5, 20), sticky="n")
         return dropdown
@@ -341,7 +343,7 @@ class WeighingApp(tk.Tk):
             text="Fehler: Geburtsjahr falsch",
             bg=THEME["bg"],
             fg=THEME["error"],
-            font=("Arial", 12, "bold"),
+            font=("Rubik", 12, "bold"),
         ).pack(pady=(18, 8))
 
         tk.Label(
@@ -349,15 +351,15 @@ class WeighingApp(tk.Tk):
             text=f"Erlaubter Bereich: {min_year} bis {max_year}",
             bg=THEME["bg"],
             fg=THEME["fg"],
-            font=("Arial", 10),
+            font=("Rubik", 10),
         ).pack(pady=(0, 8))
 
         entry = tk.Entry(
             popup,
             bg=THEME["input_bg"],
             fg="#9A9A9A",
-            insertbackground="white",
-            font=("Arial", 11),
+            insertbackground="#f0f0f2",
+            font=("Rubik", 11),
             justify="center",
         )
         entry.pack(fill=tk.X, padx=20, pady=(0, 8))
@@ -366,14 +368,14 @@ class WeighingApp(tk.Tk):
         if initial_txt:
             entry.delete(0, tk.END)
             entry.insert(0, initial_txt)
-            entry.config(fg="white")
+            entry.config(fg="#f0f0f2")
         else:
             entry.insert(0, placeholder)
 
         def on_focus_in(_event=None):
             if entry.get() == placeholder:
                 entry.delete(0, tk.END)
-                entry.config(fg="white")
+                entry.config(fg="#f0f0f2")
 
         def on_focus_out(_event=None):
             if not entry.get().strip():
@@ -411,7 +413,7 @@ class WeighingApp(tk.Tk):
             command=on_ok,
             bg=THEME["success"],
             fg="black",
-            font=("Arial", 10, "bold"),
+            font=("Rubik", 10, "bold"),
             width=10,
         ).pack(pady=(6, 14))
 
@@ -602,7 +604,7 @@ class WeighingApp(tk.Tk):
             text="keinen vollständig übereinstimmenden Daten gefunden.",
             bg=THEME["bg"],
             fg=THEME["fg"],
-            font=("Arial", 12, "bold"),
+            font=("Rubik", 12, "bold"),
             wraplength=470,
             justify="center",
         ).pack(pady=(24, 10), padx=20)
@@ -614,14 +616,14 @@ class WeighingApp(tk.Tk):
             text="QR Code ist ",
             bg=THEME["bg"],
             fg=THEME["fg"],
-            font=("Arial", 14),
+            font=("Rubik", 14),
         ).pack(side=tk.LEFT)
         tk.Label(
             status_frame,
             text=qr_status,
             bg=THEME["bg"],
             fg=status_color,
-            font=("Arial", 20, "bold"),
+            font=("Rubik", 20, "bold"),
         ).pack(side=tk.LEFT)
 
         tk.Label(
@@ -629,7 +631,7 @@ class WeighingApp(tk.Tk):
             text="Bitte manuel ändern.",
             bg=THEME["bg"],
             fg=THEME["fg"],
-            font=("Arial", 11),
+            font=("Rubik", 11),
         ).pack(pady=(0, 18))
 
         tk.Button(
@@ -637,10 +639,10 @@ class WeighingApp(tk.Tk):
             text="OK",
             command=popup.destroy,
             bg=THEME["input_bg"],
-            fg="white",
+            fg="#f0f0f2",
             activebackground=THEME["input_bg"],
-            activeforeground="white",
-            font=("Arial", 10, "bold"),
+            activeforeground="#f0f0f2",
+            font=("Rubik", 10, "bold"),
             width=12,
         ).pack()
 
@@ -1033,8 +1035,8 @@ class WeighingApp(tk.Tk):
         popup.configure(bg=THEME["bg"])
         self.add_participant_popup = popup
 
-        lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Arial", 11)}
-        entry_style = {"bg": THEME["input_bg"], "fg": "white", "font": ("Arial", 11), "insertbackground": "white"}
+        lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Rubik", 11)}
+        entry_style = {"bg": THEME["input_bg"], "fg": "#f0f0f2", "font": ("Rubik", 11), "insertbackground": "#f0f0f2"}
 
         tk.Label(popup, text="First Name", **lbl_style).pack(pady=(15, 5))
         e_first = tk.Entry(popup, **entry_style)
@@ -1072,7 +1074,7 @@ class WeighingApp(tk.Tk):
             ),
             bg=THEME["success"],
             fg="black",
-            font=("Arial", 10, "bold"),
+            font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=8)
 
@@ -1081,8 +1083,8 @@ class WeighingApp(tk.Tk):
             text="Cancel",
             command=popup.destroy,
             bg=THEME["error"],
-            fg="white",
-            font=("Arial", 10, "bold"),
+            fg="#f0f0f2",
+            font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=8)
 
@@ -1178,7 +1180,7 @@ class WeighingApp(tk.Tk):
             y_pos = (screen_h - popup_h) // 2
         popup.geometry(f"{popup_w}x{popup_h}+{max(x_pos, 0)}+{max(y_pos, 0)}")
 
-        lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Arial", 11)}
+        lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Rubik", 11)}
         dropdown_style = {
             "bg": THEME["input_bg"],
             "fg": THEME["fg"],
@@ -1186,7 +1188,7 @@ class WeighingApp(tk.Tk):
             "activeforeground": "black",
             "highlightthickness": 0,
             "bd": 0,
-            "font": ("Arial", 11, "bold"),
+            "font": ("Rubik", 11, "bold"),
             "width": 10,
         }
 
@@ -1200,7 +1202,7 @@ class WeighingApp(tk.Tk):
             fg=THEME["fg"],
             activebackground=THEME["accent"],
             activeforeground="black",
-            font=("Arial", 10),
+            font=("Rubik", 10),
         )
         decimal_dropdown.pack()
 
@@ -1208,7 +1210,7 @@ class WeighingApp(tk.Tk):
             "Beispiel: Eingang 7564 bei 2 Nachkommastellen\n"
             "wird zu 75.64 kg."
         )
-        tk.Label(popup, text=note, bg=THEME["bg"], fg="gray", font=("Arial", 10), justify="center").pack(pady=(12, 8))
+        tk.Label(popup, text=note, bg=THEME["bg"], fg="gray", font=("Rubik", 10), justify="center").pack(pady=(12, 8))
 
         tk.Label(popup, text="Datenquelle", **lbl_style).pack(pady=(8, 6))
         path_label = tk.Label(
@@ -1216,7 +1218,7 @@ class WeighingApp(tk.Tk):
             text=self.data_file_path if self.data_file_path else "Keine Datenquelle ausgewählt",
             bg=THEME["bg"],
             fg="gray",
-            font=("Arial", 9),
+            font=("Rubik", 9),
             wraplength=470,
             justify="center",
         )
@@ -1251,8 +1253,8 @@ class WeighingApp(tk.Tk):
             text="Daten laden",
             command=choose_data_file,
             bg=THEME["input_bg"],
-            fg="white",
-            font=("Arial", 10, "bold"),
+            fg="#f0f0f2",
+            font=("Rubik", 10, "bold"),
             width=20,
         ).pack(pady=(8, 4))
 
@@ -1281,7 +1283,7 @@ class WeighingApp(tk.Tk):
             command=save_and_close,
             bg=THEME["success"],
             fg="black",
-            font=("Arial", 10, "bold"),
+            font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=8)
 
@@ -1290,8 +1292,8 @@ class WeighingApp(tk.Tk):
             text="Cancel",
             command=popup.destroy,
             bg=THEME["error"],
-            fg="white",
-            font=("Arial", 10, "bold"),
+            fg="#f0f0f2",
+            font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=8)
 
@@ -1463,7 +1465,7 @@ class WeighingApp(tk.Tk):
                 text=name,
                 bg=THEME["bg"],
                 fg=THEME["fg"],
-                font=("Arial", 14),
+                font=("Rubik", 14),
             )
             name_label.pack(pady=(22, 8))
 
@@ -1472,7 +1474,7 @@ class WeighingApp(tk.Tk):
                 text=f"{display_weight} kg",
                 bg=THEME["bg"],
                 fg=THEME["fg"],
-                font=("Arial", 64, "bold"),
+                font=("Rubik", 64, "bold"),
             )
             weight_label.pack(expand=True)
 
@@ -1481,7 +1483,7 @@ class WeighingApp(tk.Tk):
                 text="Weight Übernehmen?",
                 bg=THEME["bg"],
                 fg="gray",
-                font=("Arial", 10),
+                font=("Rubik", 10),
             )
             hint_label.pack(pady=(0, 8))
 
@@ -1494,7 +1496,7 @@ class WeighingApp(tk.Tk):
                 command=self.accept_pending_weight,
                 bg=THEME["success"],
                 fg="black",
-                font=("Arial", 10, "bold"),
+                font=("Rubik", 10, "bold"),
                 width=10,
             ).pack(side=tk.LEFT, padx=8)
 
@@ -1503,8 +1505,8 @@ class WeighingApp(tk.Tk):
                 text="Cancel",
                 command=self.cancel_pending_weight,
                 bg=THEME["error"],
-                fg="white",
-                font=("Arial", 10, "bold"),
+                fg="#f0f0f2",
+                font=("Rubik", 10, "bold"),
                 width=10,
             ).pack(side=tk.LEFT, padx=8)
 
@@ -1591,7 +1593,7 @@ class WeighingApp(tk.Tk):
         self.search_var = tk.StringVar()
         self.search_var.trace("w", self.filter_list) # Bind text change to filter function
         search_entry = tk.Entry(sidebar, textvariable=self.search_var, bg=THEME["input_bg"], 
-                                fg=THEME["input_fg"], insertbackground="white", font=("Arial", 12))
+                                fg=THEME["input_fg"], insertbackground="#f0f0f2", font=("Rubik", 12))
         search_entry.pack(fill=tk.X, padx=10, pady=(18, 20), ipady=6)
 
 
@@ -1603,7 +1605,7 @@ class WeighingApp(tk.Tk):
         entry_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         self.listbox = tk.Listbox(list_frame, bg=THEME["input_bg"], fg=THEME["input_fg"], 
-                                  font=("Arial", 14), selectbackground=THEME["accent"],
+                                  font=("Rubik", 14), selectbackground=THEME["accent"],
                                   yscrollcommand=entry_scrollbar.set, borderwidth=0,
                                   selectborderwidth=2)
         self.listbox.pack(fill=tk.BOTH, expand=True, padx=(6, 2), pady=12)
@@ -1621,7 +1623,7 @@ class WeighingApp(tk.Tk):
         container = self.main_container # Alias for existing code
 
         # Central Information Box
-        box_frame = tk.Frame(container, bg=THEME["bg"], highlightbackground="white", highlightthickness=2)
+        box_frame = tk.Frame(container, bg=THEME["bg"], highlightbackground="#f0f0f2", highlightthickness=2)
         box_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 80))
 
         # Grid Configuration
@@ -1685,7 +1687,7 @@ class WeighingApp(tk.Tk):
             text="Drücke F12 um den QR Code zu scannen",
             bg=THEME["accent"],
             fg="black",
-            font=("Arial", 11, "bold"),
+            font=("Rubik", 11, "bold"),
             padx=10,
             pady=8,
             cursor="hand2",
