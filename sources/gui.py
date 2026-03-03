@@ -108,14 +108,14 @@ class WeighingApp(tk.Tk):
         btn_opts = {
             "bg": THEME["input_bg"], "fg": "white", 
             "font": ("Arial", 10, "bold"), "bd": 1, 
-            "relief": "flat", "height": 2
+            "relief": "flat", "height": 2, "cursor": "hand2"
         }
         
         # Button 3: Save Weight (Update Participant)
-        tk.Button(btn_container, text="Save", command=self.save_weight, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_container, text="Speichern", command=self.save_weight, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
 
         # Button 5: Read from Scale (Mock Simulation)
-        tk.Button(btn_container, text="take current weight", command=self.read_scale, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_container, text="Gewicht nehmen", command=self.read_scale, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
 
         # Settings
         tk.Button(btn_container, text="Einstellungen", command=self.open_settings_window, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
@@ -986,7 +986,7 @@ class WeighingApp(tk.Tk):
                     "timestamp": datetime.now().isoformat(),
                 }
             )
-            messagebox.showinfo("Saved", f"Updated: {full_name}\nWeight: {weight} kg")
+            messagebox.showinfo("Saved", f"Updated: {full_name}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not save data: {e}")
 
@@ -1153,11 +1153,30 @@ class WeighingApp(tk.Tk):
 
     def open_settings_window(self):
         """Opens a dialog to configure app settings."""
+        popup_w = 520
+        popup_h = 360
         popup = tk.Toplevel(self)
         popup.title("Einstellungen")
-        popup.geometry("520x360")
+        popup.geometry(f"{popup_w}x{popup_h}")
         popup.configure(bg=THEME["bg"])
         popup.resizable(False, False)
+        popup.transient(self)
+
+        popup.update_idletasks()
+        try:
+            self.update_idletasks()
+            root_x = self.winfo_rootx()
+            root_y = self.winfo_rooty()
+            root_w = self.winfo_width()
+            root_h = self.winfo_height()
+            x_pos = root_x + (root_w - popup_w) // 2
+            y_pos = root_y + (root_h - popup_h) // 2
+        except Exception:
+            screen_w = popup.winfo_screenwidth()
+            screen_h = popup.winfo_screenheight()
+            x_pos = (screen_w - popup_w) // 2
+            y_pos = (screen_h - popup_h) // 2
+        popup.geometry(f"{popup_w}x{popup_h}+{max(x_pos, 0)}+{max(y_pos, 0)}")
 
         lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Arial", 11)}
         dropdown_style = {
