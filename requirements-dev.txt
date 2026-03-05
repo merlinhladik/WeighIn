@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest
+#py -m pip install pytest-cov
+#source venv/bin/activate
