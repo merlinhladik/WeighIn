@@ -22,7 +22,7 @@
     "Association": "JV Berlin",
     "Weight": 815.0,
     "Valid": false,
-    "Gender": "male",
+    "Gender": "m",
     "Paid": true
   },
   {
@@ -35,7 +35,7 @@
     "Association": "NWJV",
     "Weight": 0.0,
     "Valid": false,
-    "Gender": "male",
+    "Gender": "m",
     "Paid": true
   },
   {
@@ -134,12 +134,12 @@
     "Firstname": "Felix",
     "Lastname": "Zimmermann",
     "Name": "Felix Zimmermann",
-    "Birthyear": 2017,
+    "Birthyear": 2020,
     "Club": "Eintracht Frankfurt Judo",
     "Association": "HJV",
     "Weight": 0.0,
     "Valid": false,
-    "Gender": "male",
+    "Gender": "m",
     "Paid": false
   },
   {

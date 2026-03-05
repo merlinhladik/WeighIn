@@ -19,10 +19,6 @@ except Exception:
 
 PAID = "Zahlung erfolgt"
 UNPAID = "Zahlung offen"
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_JSON_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "data.json"))
-SETTINGS_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "settings.json"))
 WS_HOST = "localhost"
 WS_PORT = 8765
 WEIGHT_KEY = "Weight"
@@ -32,8 +28,8 @@ BIRTHYEAR_KEY = "Birthyear"
 TEXT_KEYS = ["Firstname", "Lastname", "Name", "Club", "Gender"]
 FIELD_WIDTH = 20
 LABEL_WIDTH = 22
-MIN_AGE_YEARS = 6
-MAX_AGE_YEARS = 120
+DEFAULT_MIN_AGE_YEARS = 6
+DEFAULT_MAX_AGE_YEARS = 120
 
 THEME = {
     "bg": "#1e1e1e",        # VSCode Dark+ Background
@@ -73,6 +69,15 @@ class WeighingApp(tk.Tk):
         self.weight_popup_value_label: Optional[tk.Label] = None
         self.add_participant_popup: Optional[tk.Toplevel] = None
         self.add_participant_fields: Dict[str, Any] = {}
+        self.min_age_years: int = DEFAULT_MIN_AGE_YEARS
+        self.max_age_years: int = DEFAULT_MAX_AGE_YEARS
+        self.double_start_mode: str = "standard"
+        self.double_start_years: List[int] = []
+        self.age_class_tolerance: Dict[str, Dict[str, float]] = {
+            "mixed": {"U9": 0.0, "U11": 0.0},
+            "male": {"U13": 0.0, "U15": 0.0, "U18": 0.0, "Aktive": 0.0},
+            "female": {"U13": 0.0, "U15": 0.0, "U18": 0.0, "Aktive": 0.0},
+        }
 
         # WebSocket server state (GUI acts as server)
         self.ws_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -119,6 +124,23 @@ class WeighingApp(tk.Tk):
 
         # Settings
         tk.Button(btn_container, text="Einstellungen", command=self.open_settings_window, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
+        double_start_btn_opts = dict(btn_opts)
+        double_start_btn_opts.update(
+            {
+                "bg": "#FFD54A",
+                "fg": "black",
+                "activebackground": "#FFD54A",
+                "activeforeground": "black",
+            }
+        )
+        self.btn_double_start = tk.Button(
+            btn_container,
+            text="Doppelstart",
+            command=self.open_double_start_window,
+            width=18,
+            **double_start_btn_opts,
+        )
+        self.btn_double_start.pack(side=tk.LEFT, padx=5)
 
         # Configuration for the Add Participant button (Secondary Action)
         add_btn_opts = dict(btn_opts)
@@ -153,7 +175,7 @@ class WeighingApp(tk.Tk):
         self.btn_delete = tk.Button(
             btn_container,
             text="Teilnehmer löschen",
-            command=self.delete_selected_participant,
+            command=getattr(self, "delete_selected_participant", lambda: None),
             width=18,
             **delete_btn_opts,
         )
@@ -197,7 +219,7 @@ class WeighingApp(tk.Tk):
         self.duplicate_warning_frame.place_forget()
 
 
-    def create_label(self, parent, text, r, c):
+    def create_label(self, parent, text, r, c, pady=(28, 0)):
         """Creates a standard label at the specified grid position."""
         lbl = tk.Label(
             parent,
@@ -208,18 +230,18 @@ class WeighingApp(tk.Tk):
             anchor="w",
             width=LABEL_WIDTH,
         )
-        lbl.grid(row=r, column=c, padx=20, pady=(40, 0), sticky="n")
+        lbl.grid(row=r, column=c, padx=14, pady=pady, sticky="n")
 
     def create_value(self, parent, text, r, c, pady=(5, 20)):
         """Creates a read-only value label at the specified grid position."""
         lbl = tk.Label(parent, text=text, bg=THEME["bg"], fg="gray", font=("Rubik", 16))
-        lbl.grid(row=r, column=c, padx=20, pady=pady, sticky="n")
+        lbl.grid(row=r, column=c, padx=14, pady=pady, sticky="n")
         return lbl
 
     def create_entry_value(self, parent, r, c):
         """Creates an editable entry field at the specified grid position."""
         entry = tk.Entry(parent, bg=THEME["input_bg"], fg="#f0f0f2", font=("Rubik", 14), justify="left", width=FIELD_WIDTH)
-        entry.grid(row=r, column=c, padx=20, pady=(5, 20), ipady=4, sticky="n")
+        entry.grid(row=r, column=c, padx=14, pady=(5, 14), ipady=4, sticky="n")
         return entry
 
     def create_status_dropdown(self, parent, variable, options, r, c):
@@ -233,7 +255,7 @@ class WeighingApp(tk.Tk):
             highlightthickness=0,
             bd=0,
             font=("Rubik", 12, "bold"),
-            width=FIELD_WIDTH,
+            width=max(FIELD_WIDTH - 1, 1),
             anchor="w",
         )
         dropdown["menu"].config(
@@ -243,7 +265,7 @@ class WeighingApp(tk.Tk):
             activeforeground="black",
             font=("Rubik", 11),
         )
-        dropdown.grid(row=r, column=c, padx=20, pady=(5, 20), sticky="n")
+        dropdown.grid(row=r, column=c, padx=14, pady=(5, 14), sticky="n")
         return dropdown
 
     @staticmethod
@@ -292,15 +314,19 @@ class WeighingApp(tk.Tk):
         return "---"
 
     @staticmethod
-    def parse_birth_year(value: Any) -> Optional[int]:
+    def parse_birth_year(
+        value: Any,
+        min_age_years: int = DEFAULT_MIN_AGE_YEARS,
+        max_age_years: int = DEFAULT_MAX_AGE_YEARS,
+    ) -> Optional[int]:
         """Parses and validates a year value."""
         txt = str(value or "").strip()
         if not txt.isdigit():
             return None
         year = int(txt)
         now_year = datetime.now().year
-        min_year = now_year - MAX_AGE_YEARS
-        max_year = now_year - MIN_AGE_YEARS
+        min_year = now_year - max_age_years
+        max_year = now_year - min_age_years
         if min_year <= year <= max_year:
             return year
         return None
@@ -308,8 +334,10 @@ class WeighingApp(tk.Tk):
     def prompt_birth_year_correction(self, parent, initial_value: Any = "") -> int:
         """Shows a blocking error dialog until a valid birth year is entered."""
         now_year = datetime.now().year
-        min_year = now_year - MAX_AGE_YEARS
-        max_year = now_year - MIN_AGE_YEARS
+        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
+        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
+        min_year = now_year - max_age
+        max_year = now_year - min_age
         placeholder = "Bitte neues Geburtsjahr eingeben"
         result = {"year": None}
         popup_w = 420
@@ -321,7 +349,8 @@ class WeighingApp(tk.Tk):
         popup.configure(bg=THEME["bg"])
         popup.resizable(False, False)
         popup.transient(parent)
-        popup.update_idletasks()
+        if hasattr(popup, "update_idletasks"):
+            popup.update_idletasks()
         try:
             parent.update_idletasks()
             parent_x = parent.winfo_rootx()
@@ -387,7 +416,7 @@ class WeighingApp(tk.Tk):
             value = entry.get().strip()
             if value == placeholder:
                 value = ""
-            parsed_year = WeighingApp.parse_birth_year(value)
+            parsed_year = WeighingApp.parse_birth_year(value, min_age, max_age)
             if parsed_year is None:
                 messagebox.showerror(
                     "Fehler",
@@ -580,7 +609,8 @@ class WeighingApp(tk.Tk):
 
         popup_w = 520
         popup_h = 260
-        popup.update_idletasks()
+        if hasattr(popup, "update_idletasks"):
+            popup.update_idletasks()
         try:
             self.update_idletasks()
             root_x = self.winfo_rootx()
@@ -742,6 +772,10 @@ class WeighingApp(tk.Tk):
         self.paid_var.set(UNPAID)
         self.gender_var.set("weiblich")
         self.update_status_dropdown_colors()
+        if hasattr(self, "update_tolerance_label"):
+            WeighingApp.update_tolerance_label(self)
+        if hasattr(self, "update_double_start_visibility"):
+            WeighingApp.update_double_start_visibility(self)
     
     def filter_list(self, *args):
         """Filters the participant list based on the search bar input."""
@@ -787,6 +821,8 @@ class WeighingApp(tk.Tk):
              messagebox.showerror("Error", f"Data file not found: {self.data_file_path}")
              return
 
+        if hasattr(self, "load_event_settings"):
+            self.load_event_settings()
         try:
             with open(self.data_file_path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
@@ -820,6 +856,238 @@ class WeighingApp(tk.Tk):
         """Applies startup defaults without loading persisted file settings."""
         self.weight_decimal_places = 0
         self.data_file_path = ""
+        self.min_age_years = DEFAULT_MIN_AGE_YEARS
+        self.max_age_years = DEFAULT_MAX_AGE_YEARS
+        self.double_start_mode = "standard"
+        self.double_start_years = []
+
+    def load_event_settings(self):
+        """Loads age range and tolerance config from setting.json near selected data source."""
+        self.min_age_years = DEFAULT_MIN_AGE_YEARS
+        self.max_age_years = DEFAULT_MAX_AGE_YEARS
+        self.double_start_years = []
+        self.age_class_tolerance = {
+            "mixed": {"U9": 0.0, "U11": 0.0},
+            "male": {"U13": 0.0, "U15": 0.0, "U18": 0.0, "Aktive": 0.0},
+            "female": {"U13": 0.0, "U15": 0.0, "U18": 0.0, "Aktive": 0.0},
+        }
+
+        if not self.data_file_path:
+            return
+
+        settings_path = os.path.join(os.path.dirname(self.data_file_path), "setting.json")
+        if not os.path.exists(settings_path):
+            return
+
+        try:
+            with open(settings_path, "r", encoding="utf-8-sig") as f:
+                cfg = json.load(f)
+        except Exception:
+            return
+
+        age_range = cfg.get("ageRange", {}) if isinstance(cfg, dict) else {}
+        min_age_raw = age_range.get("minAge")
+        max_age_raw = age_range.get("maxAge")
+        if isinstance(min_age_raw, int) and min_age_raw >= 0:
+            self.min_age_years = min_age_raw
+        if isinstance(max_age_raw, int) and max_age_raw >= self.min_age_years:
+            self.max_age_years = max_age_raw
+
+        tol_cfg = cfg.get("ageClassTolerance", {}) if isinstance(cfg, dict) else {}
+        if isinstance(tol_cfg, dict):
+            for g in ["mixed", "male", "female"]:
+                raw_map = tol_cfg.get(g)
+                if not isinstance(raw_map, dict):
+                    continue
+                for klass, value in raw_map.items():
+                    if not isinstance(klass, str):
+                        continue
+                    if isinstance(value, (int, float)):
+                        klass_name = klass.strip()
+                        if klass_name.lower() == "senior":
+                            klass_name = "Aktive"
+                        self.age_class_tolerance[g][klass_name] = float(value)
+
+        raw_years = cfg.get("doubleStartYears", []) if isinstance(cfg, dict) else []
+        if isinstance(raw_years, list):
+            parsed_years = []
+            for year in raw_years:
+                try:
+                    y = int(year)
+                except Exception:
+                    continue
+                parsed_years.append(y)
+            self.double_start_years = parsed_years
+
+        if hasattr(self, "update_tolerance_label"):
+            WeighingApp.update_tolerance_label(self)
+        if hasattr(self, "update_double_start_label"):
+            WeighingApp.update_double_start_label(self)
+        if hasattr(self, "update_double_start_visibility"):
+            WeighingApp.update_double_start_visibility(self)
+
+    def update_double_start_label(self):
+        """Updates the yellow status label above the QR scan hint."""
+        if not hasattr(self, "double_start_status_label"):
+            return
+        mode_label = "höher" if self.double_start_mode in {"hoeher", "höher"} else self.double_start_mode
+        self.double_start_status_label.config(
+            text=f"Doppelstart: {mode_label}"
+        )
+
+    def is_double_start_eligible(self) -> bool:
+        """Returns True when current birth year is allowed for double start."""
+        if not hasattr(self, "val_birthyear"):
+            return False
+        txt = self.val_birthyear.get().strip()
+        if not txt.isdigit():
+            return False
+        return int(txt) in set(self.double_start_years or [])
+
+    def update_double_start_visibility(self, *_args):
+        """Shows/hides double-start button and status label for allowed birth years."""
+        eligible = self.is_double_start_eligible()
+
+        if hasattr(self, "btn_double_start"):
+            if eligible:
+                if not self.btn_double_start.winfo_manager():
+                    self.btn_double_start.pack(side=tk.LEFT, padx=5)
+            elif self.btn_double_start.winfo_manager():
+                self.btn_double_start.pack_forget()
+
+        if hasattr(self, "double_start_status_label"):
+            if eligible:
+                self.double_start_status_label.grid()
+                self.update_double_start_label()
+            else:
+                self.double_start_status_label.grid_remove()
+
+    def open_double_start_window(self):
+        """Opens a small dialog to choose the double-start mode."""
+        popup = tk.Toplevel(self)
+        popup.title("Doppelstart")
+        popup.geometry("320x210")
+        popup.configure(bg=THEME["bg"])
+        popup.resizable(False, False)
+        popup.transient(self)
+        popup.update_idletasks()
+        try:
+            self.update_idletasks()
+            x_pos = self.winfo_rootx() + (self.winfo_width() - 320) // 2
+            y_pos = self.winfo_rooty() + (self.winfo_height() - 210) // 2
+            popup.geometry(f"320x210+{max(x_pos, 0)}+{max(y_pos, 0)}")
+        except Exception:
+            pass
+        popup.grab_set()
+
+        tk.Label(
+            popup,
+            text="Doppelstart-Modus",
+            bg=THEME["bg"],
+            fg=THEME["fg"],
+            font=("Rubik", 12, "bold"),
+        ).pack(pady=(14, 8))
+
+        mode_var = tk.StringVar(value=self.double_start_mode)
+        for value, text in [
+            ("standard", "standard"),
+            ("hoeher", "höher"),
+            ("doppel", "doppel"),
+        ]:
+            tk.Radiobutton(
+                popup,
+                text=text,
+                variable=mode_var,
+                value=value,
+                bg=THEME["bg"],
+                fg=THEME["fg"],
+                activebackground=THEME["bg"],
+                activeforeground=THEME["fg"],
+                selectcolor=THEME["input_bg"],
+                font=("Rubik", 11),
+                anchor="w",
+                width=14,
+            ).pack(pady=2)
+
+        btn_frame = tk.Frame(popup, bg=THEME["bg"])
+        btn_frame.pack(pady=(14, 8))
+
+        def apply_mode():
+            self.double_start_mode = mode_var.get()
+            self.update_double_start_label()
+            popup.destroy()
+
+        tk.Button(
+            btn_frame,
+            text="Übernehmen",
+            command=apply_mode,
+            bg=THEME["success"],
+            fg="black",
+            font=("Rubik", 10, "bold"),
+            width=12,
+        ).pack(side=tk.LEFT, padx=6)
+
+        tk.Button(
+            btn_frame,
+            text="Cancel",
+            command=popup.destroy,
+            bg=THEME["error"],
+            fg="#f0f0f2",
+            font=("Rubik", 10, "bold"),
+            width=12,
+        ).pack(side=tk.LEFT, padx=6)
+
+    @staticmethod
+    def get_age_class(age_years: int) -> str:
+        """Maps age in years to configured age classes."""
+        if age_years <= 8:
+            return "U9"
+        if age_years <= 10:
+            return "U11"
+        if age_years <= 12:
+            return "U13"
+        if age_years <= 14:
+            return "U15"
+        if age_years <= 17:
+            return "U18"
+        return "Aktive"
+
+    def get_tolerance_for(self, gender_ui: str, age_class: str) -> Optional[float]:
+        """Resolves tolerance by age class and gender with mixed fallback."""
+        cfg_key = "male" if gender_ui == "maennlich" else "female"
+        val = self.age_class_tolerance.get(cfg_key, {}).get(age_class)
+        if val is None and age_class == "Aktive":
+            val = self.age_class_tolerance.get(cfg_key, {}).get("Senior")
+        if val is None:
+            val = self.age_class_tolerance.get("mixed", {}).get(age_class)
+        if val is None and age_class == "Aktive":
+            val = self.age_class_tolerance.get("mixed", {}).get("Senior")
+        return val
+
+    def update_tolerance_label(self, *_args):
+        """Updates tolerance hint below weight input based on current gender and birth year."""
+        if not hasattr(self, "tolerance_hint_prefix_label") or not hasattr(self, "tolerance_hint_value_label"):
+            return
+
+        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
+        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
+        birth_year = WeighingApp.parse_birth_year(self.val_birthyear.get().strip(), min_age, max_age)
+        if birth_year is None:
+            self.tolerance_hint_prefix_label.config(text="")
+            self.tolerance_hint_value_label.config(text="")
+            return
+
+        age_years = datetime.now().year - birth_year
+        age_class = self.get_age_class(age_years)
+        gender_ui = WeighingApp.normalize_ui_gender(self.gender_var.get())
+        tolerance = self.get_tolerance_for(gender_ui, age_class)
+        if tolerance is None:
+            self.tolerance_hint_prefix_label.config(text="")
+            self.tolerance_hint_value_label.config(text="")
+            return
+
+        self.tolerance_hint_prefix_label.config(text=f"Toleranz ({age_class}):")
+        self.tolerance_hint_value_label.config(text=f"{tolerance:g} kg")
 
     def prompt_for_data_source_selection(self):
         """Prompts user to choose a data source when app starts without one."""
@@ -882,6 +1150,10 @@ class WeighingApp(tk.Tk):
         weight = p.get(WEIGHT_KEY, 0.0)
         self.weight_var.delete(0, tk.END)
         self.weight_var.insert(0, str(weight))
+        if hasattr(self, "update_tolerance_label"):
+            WeighingApp.update_tolerance_label(self)
+        if hasattr(self, "update_double_start_visibility"):
+            WeighingApp.update_double_start_visibility(self)
         # self.entry_weight.focus() # Auto-focus for immediate entry
 
     def save_data(self):
@@ -956,7 +1228,9 @@ class WeighingApp(tk.Tk):
         p["Gender"] = WeighingApp.normalize_json_gender(self.gender_var.get())
         p[VALID_KEY] = is_valid
         p[PAID_KEY] = is_paid
-        parsed_year = WeighingApp.parse_birth_year(birth_year_txt)
+        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
+        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
+        parsed_year = WeighingApp.parse_birth_year(birth_year_txt, min_age, max_age)
         if parsed_year is None:
             parsed_year = self.prompt_birth_year_correction(self, birth_year_txt)
             self.val_birthyear.delete(0, tk.END)
@@ -1115,7 +1389,9 @@ class WeighingApp(tk.Tk):
             messagebox.showwarning("Missing fields", "First name and last name are required.", parent=popup)
             return
 
-        birth_year = WeighingApp.parse_birth_year(birth_year_txt)
+        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
+        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
+        birth_year = WeighingApp.parse_birth_year(birth_year_txt, min_age, max_age)
         if birth_year is None:
             birth_year = self.prompt_birth_year_correction(popup, birth_year_txt)
             e_birthyear.delete(0, tk.END)
@@ -1162,11 +1438,14 @@ class WeighingApp(tk.Tk):
         popup.geometry(f"{popup_w}x{popup_h}")
         popup.configure(bg=THEME["bg"])
         popup.resizable(False, False)
-        popup.transient(self)
+        if hasattr(popup, "transient"):
+            popup.transient(self)
 
-        popup.update_idletasks()
+        if hasattr(popup, "update_idletasks"):
+            popup.update_idletasks()
         try:
-            self.update_idletasks()
+            if hasattr(self, "update_idletasks"):
+                self.update_idletasks()
             root_x = self.winfo_rootx()
             root_y = self.winfo_rooty()
             root_w = self.winfo_width()
@@ -1174,8 +1453,8 @@ class WeighingApp(tk.Tk):
             x_pos = root_x + (root_w - popup_w) // 2
             y_pos = root_y + (root_h - popup_h) // 2
         except Exception:
-            screen_w = popup.winfo_screenwidth()
-            screen_h = popup.winfo_screenheight()
+            screen_w = popup.winfo_screenwidth() if hasattr(popup, "winfo_screenwidth") else popup_w
+            screen_h = popup.winfo_screenheight() if hasattr(popup, "winfo_screenheight") else popup_h
             x_pos = (screen_w - popup_w) // 2
             y_pos = (screen_h - popup_h) // 2
         popup.geometry(f"{popup_w}x{popup_h}+{max(x_pos, 0)}+{max(y_pos, 0)}")
@@ -1225,11 +1504,9 @@ class WeighingApp(tk.Tk):
         path_label.pack(padx=15)
 
         def choose_data_file():
-            initial_dir = os.path.dirname(self.data_file_path) if self.data_file_path else os.path.dirname(DEFAULT_JSON_FILE)
             selected_path = filedialog.askopenfilename(
                 parent=popup,
                 title="Daten laden",
-                initialdir=initial_dir,
                 filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
             )
             if not selected_path:
@@ -1624,7 +1901,7 @@ class WeighingApp(tk.Tk):
 
         # Central Information Box
         box_frame = tk.Frame(container, bg=THEME["bg"], highlightbackground="#f0f0f2", highlightthickness=2)
-        box_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 80))
+        box_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 40))
 
         # Grid Configuration
         box_frame.columnconfigure(0, weight=1)
@@ -1633,8 +1910,8 @@ class WeighingApp(tk.Tk):
         # --- Grid Elements ---
         
         # Row 0: Labels for Name
-        self.create_label(box_frame, "Vorname:", 0, 0)
-        self.create_label(box_frame, "Nachname:", 0, 1)
+        self.create_label(box_frame, "Vorname:", 0, 0, pady=(60, 0))
+        self.create_label(box_frame, "Nachname:", 0, 1, pady=(60, 0))
 
         # Row 1: Editable Name Fields
         self.val_prename = self.create_entry_value(box_frame, 1, 0)
@@ -1649,39 +1926,85 @@ class WeighingApp(tk.Tk):
         self.val_club = self.create_entry_value(box_frame, 3, 1)
 
 
-        # Row 4: Birth year and gender labels
-        self.create_label(box_frame, "Geburtsjahr:", 4, 0)
-        self.create_label(box_frame, "Geschlecht:", 4, 1)
+        tolerance_row = tk.Frame(box_frame, bg=THEME["bg"])
+        tolerance_row.grid(row=4, column=0, padx=14, pady=(0, 10), sticky="n")
+        self.tolerance_hint_prefix_label = tk.Label(
+            tolerance_row,
+            text="",
+            bg=THEME["bg"],
+            fg="#FFD54A",
+            font=("Rubik", 12, "bold"),
+            width=20,
+            anchor="w",
+            justify="left",
+        )
+        self.tolerance_hint_prefix_label.grid(row=0, column=0, sticky="w")
+        self.tolerance_hint_value_label = tk.Label(
+            tolerance_row,
+            text="",
+            bg=THEME["bg"],
+            fg="#FFD54A",
+            font=("Rubik", 12, "bold"),
+            anchor="w",
+            justify="left",
+        )
+        self.tolerance_hint_value_label.grid(row=0, column=1, sticky="w")
+
+        # Row 5: Birth year and gender labels
+        self.create_label(box_frame, "Geburtsjahr:", 5, 0, pady=(12, 0))
+        self.create_label(box_frame, "Geschlecht:", 5, 1, pady=(12, 0))
         
-        # Row 5: Editable birth year field
-        self.val_birthyear = self.create_entry_value(box_frame, 5, 0)
+        # Row 6: Editable birth year field
+        self.val_birthyear = self.create_entry_value(box_frame, 6, 0)
         self.gender_var = tk.StringVar()
         self.val_gender = self.create_status_dropdown(
-            box_frame, self.gender_var, ["maennlich", "weiblich"], 5, 1
+            box_frame, self.gender_var, ["maennlich", "weiblich"], 6, 1
         )
 
-        # Row 6: Status Labels
-        self.create_label(box_frame, "ist gültig:", 6, 0)
-        self.create_label(box_frame, "hat gezahlt:", 6, 1)
+        # Row 7: Status Labels
+        self.create_label(box_frame, "ist gültig:", 7, 0)
+        self.create_label(box_frame, "hat gezahlt:", 7, 1)
         
-        # Row 7: Status Values (Color-coded)
+        # Row 8: Status Values (Color-coded)
         # Adding extra bottom padding to prevent sticking to the box border
         self.valid_var = tk.StringVar(value="ungueltig")
         self.paid_var = tk.StringVar(value=UNPAID)
         self.val_valid = self.create_status_dropdown(
-            box_frame, self.valid_var, ["gueltig", "ungueltig"], 7, 0
+            box_frame, self.valid_var, ["gueltig", "ungueltig"], 8, 0
         )
         self.val_paid = self.create_status_dropdown(
-            box_frame, self.paid_var, [PAID, UNPAID], 7, 1
+            box_frame, self.paid_var, [PAID, UNPAID], 8, 1
         )
         self.valid_var.trace_add("write", self.update_status_dropdown_colors)
         self.paid_var.trace_add("write", self.update_status_dropdown_colors)
         self.gender_var.trace_add("write", self.update_status_dropdown_colors)
+        tolerance_callback = getattr(self, "update_tolerance_label", None)
+        if callable(tolerance_callback):
+            self.gender_var.trace_add("write", tolerance_callback)
         self.update_status_dropdown_colors()
+        if callable(tolerance_callback):
+            self.val_birthyear.bind("<KeyRelease>", tolerance_callback)
+            self.val_birthyear.bind("<FocusOut>", tolerance_callback)
+        double_start_callback = getattr(self, "update_double_start_visibility", None)
+        if callable(double_start_callback):
+            self.val_birthyear.bind("<KeyRelease>", double_start_callback)
+            self.val_birthyear.bind("<FocusOut>", double_start_callback)
 
         # Scan hint at the bottom of the white content box.
+        self.double_start_status_label = tk.Label(
+            box_frame,
+            text=f"Doppelstart: {self.double_start_mode}",
+            bg=THEME["bg"],
+            fg="#FFD54A",
+            font=("Rubik", 13, "bold"),
+            anchor="center",
+            justify="center",
+        )
+        self.double_start_status_label.grid(row=9, column=0, columnspan=2, padx=14, pady=(16, 6), sticky="n")
+
+        box_frame.rowconfigure(10, weight=1)
         hint_frame = tk.Frame(box_frame, bg=THEME["accent"], bd=0)
-        hint_frame.grid(row=8, column=0, columnspan=2, padx=20, pady=(24, 10), sticky="ew")
+        hint_frame.grid(row=10, column=0, columnspan=2, padx=14, pady=(8, 18), sticky="sew")
         scan_hint_label = tk.Label(
             hint_frame,
             text="Drücke F12 um den QR Code zu scannen",
@@ -1694,6 +2017,7 @@ class WeighingApp(tk.Tk):
         )
         scan_hint_label.pack(fill=tk.X)
         scan_hint_label.bind("<Button-1>", self.trigger_qr_scan_hotkey)
+        self.update_double_start_visibility()
 
         # --- Action Buttons (Bottom) ---
         # self.create_action_buttons() # Moved to top
