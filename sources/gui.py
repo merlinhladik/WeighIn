@@ -11,8 +11,6 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import websockets
-import weight
-import real_scanner
 try:
     import keyboard
 except Exception:
@@ -480,6 +478,7 @@ class WeighingApp(tk.Tk):
         e_first = self.add_participant_fields.get("e_first")
         e_last = self.add_participant_fields.get("e_last")
         e_birthyear = self.add_participant_fields.get("e_birthyear")
+        valid_var = self.add_participant_fields.get("valid_var")
         if not e_first or not e_last:
             return
 
@@ -496,7 +495,8 @@ class WeighingApp(tk.Tk):
         if birth_year:
             e_birthyear.delete(0, tk.END)
             e_birthyear.insert(0, birth_year)
-
+        if valid_var is not None:
+            valid_var.set("gültig" if self._qr_is_valid(qr_data.get("exp_timestamp")) else "ungültig")
         popup.lift()
         e_first.focus_set()
 
@@ -1267,12 +1267,13 @@ class WeighingApp(tk.Tk):
 
         popup = tk.Toplevel(self)
         popup.title("Neuen Teilnehmer hinzufügen")
-        popup.geometry("400x420")
+        popup.geometry("400x560")
         popup.configure(bg=THEME["bg"])
         self.add_participant_popup = popup
 
         lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Rubik", 11)}
         entry_style = {"bg": THEME["input_bg"], "fg": "#f0f0f2", "font": ("Rubik", 11), "insertbackground": "#f0f0f2"}
+        radio_style = {"bg": THEME["bg"], "fg": THEME["fg"], "selectcolor": THEME["secondary"]}
 
         tk.Label(popup, text="First Name", **lbl_style).pack(pady=(15, 5))
         e_first = tk.Entry(popup, **entry_style)
@@ -1299,6 +1300,28 @@ class WeighingApp(tk.Tk):
         tk.Radiobutton(g_frame, text="weiblich", variable=gender_var, value="weiblich",
                        bg=THEME["bg"], fg=THEME["fg"], selectcolor=THEME["secondary"]).pack(side=tk.LEFT, padx=10)
 
+        tk.Label(popup, text="Gültigkeit", **lbl_style).pack(pady=(10, 5))
+        valid_var = tk.StringVar(value="ungültig")
+        valid_frame = tk.Frame(popup, bg=THEME["bg"])
+        valid_frame.pack()
+        tk.Radiobutton(
+            valid_frame, text="gültig", variable=valid_var, value="gültig", **radio_style
+        ).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(
+            valid_frame, text="ungültig", variable=valid_var, value="ungültig", **radio_style
+        ).pack(side=tk.LEFT, padx=10)
+
+        tk.Label(popup, text="Zahlung", **lbl_style).pack(pady=(10, 5))
+        paid_var = tk.StringVar(value=UNPAID)
+        paid_frame = tk.Frame(popup, bg=THEME["bg"])
+        paid_frame.pack()
+        tk.Radiobutton(
+            paid_frame, text=PAID, variable=paid_var, value=PAID, **radio_style
+        ).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(
+            paid_frame, text=UNPAID, variable=paid_var, value=UNPAID, **radio_style
+        ).pack(side=tk.LEFT, padx=10)
+
         button_frame = tk.Frame(popup, bg=THEME["bg"])
         button_frame.pack(pady=25)
 
@@ -1306,7 +1329,7 @@ class WeighingApp(tk.Tk):
             button_frame,
             text="Save",
             command=lambda: self.save_new_participant(
-                popup, e_first, e_last, e_club, e_birthyear, gender_var
+                popup, e_first, e_last, e_club, e_birthyear, gender_var, valid_var, paid_var
             ),
             bg=THEME["success"],
             fg="black",
@@ -1330,6 +1353,8 @@ class WeighingApp(tk.Tk):
             "e_club": e_club,
             "e_birthyear": e_birthyear,
             "gender_var": gender_var,
+            "valid_var": valid_var,
+            "paid_var": paid_var,
         }
 
         def _on_popup_close():
@@ -1339,13 +1364,15 @@ class WeighingApp(tk.Tk):
 
         popup.protocol("WM_DELETE_WINDOW", _on_popup_close)
 
-    def save_new_participant(self, popup, e_first, e_last, e_club, e_birthyear, gender_var):
+    def save_new_participant(self, popup, e_first, e_last, e_club, e_birthyear, gender_var, valid_var, paid_var):
         """Validates and stores a new participant."""
         first = e_first.get().strip()
         last = e_last.get().strip()
         club = e_club.get().strip()
         birth_year_txt = e_birthyear.get().strip()
         gender = gender_var.get()
+        is_valid = valid_var.get() == "gültig"
+        is_paid = paid_var.get() == PAID
 
         if not first or not last:
             messagebox.showwarning("Missing fields", "First name and last name are required.", parent=popup)
@@ -1382,9 +1409,9 @@ class WeighingApp(tk.Tk):
             BIRTHYEAR_KEY: birth_year,
             "Club": club if club else None,
             WEIGHT_KEY: 0.0,
-            VALID_KEY: False,
+            VALID_KEY: is_valid,
             "Gender": WeighingApp.normalize_json_gender(gender),
-            PAID_KEY: False,
+            PAID_KEY: is_paid,
         }
 
         try:
@@ -1577,7 +1604,6 @@ class WeighingApp(tk.Tk):
         try:
             self.ws_server = self.ws_loop.run_until_complete(self._start_ws_server())
             print(f"[WebSocket] Server running on ws://{WS_HOST}:{WS_PORT}")
-            self.after(0, self.start_external_programs)
             self.ws_loop.run_forever()
         except Exception as e:
             print(f"[WebSocket] Server start failed: {e}")
@@ -1597,36 +1623,6 @@ class WeighingApp(tk.Tk):
     async def _start_ws_server(self):
         """Starts websockets.serve inside a running event loop."""
         return await websockets.serve(self._ws_handler, WS_HOST, WS_PORT)
-
-    def start_external_programs(self):
-        """Starts the scanner and weight clients once after the GUI websocket server is ready."""
-        if self.external_programs_started:
-            return
-
-        self.external_programs_started = True
-        runners = [
-            ("weight", self._run_weight_program),
-            ("real_scanner", self._run_real_scanner_program),
-        ]
-
-        for name, target in runners:
-            thread = threading.Thread(target=target, name=f"{name}-thread", daemon=True)
-            thread.start()
-            self.external_program_threads.append(thread)
-
-    def _run_weight_program(self):
-        """Runs the scale client in its own thread."""
-        try:
-            asyncio.run(weight.main())
-        except Exception as exc:
-            print(f"[Weight] Program stopped: {exc}")
-
-    def _run_real_scanner_program(self):
-        """Runs the QR scanner client in its own thread."""
-        try:
-            asyncio.run(real_scanner.main())
-        except Exception as exc:
-            print(f"[Scanner] Program stopped: {exc}")
 
     async def _ws_handler(self, websocket, path=None):
         """Handles inbound messages from connected clients."""

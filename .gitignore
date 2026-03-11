@@ -6,4 +6,4 @@ sources/venv/
 .vscode
 dist
 build
-Competition Control.spec
+CompetitionControl.spec
