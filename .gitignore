@@ -4,3 +4,6 @@
 __pycache__/
 sources/venv/
 .vscode
+dist
+build
+Competition Control.spec

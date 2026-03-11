@@ -4,7 +4,13 @@
 import cv2
 import numpy as np
 import logging
+import tkinter as tk
 from wsclient import WebSocketClient, WeightClient
+
+try:
+    from pygrabber.dshow_graph import FilterGraph
+except Exception:
+    FilterGraph = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,6 +19,85 @@ URL = "ws://localhost:8765"
 
 DECODE_W, DECODE_H = 80, 140
 MIN_DIGITS, MAX_DIGITS = 3, 5
+
+
+def list_available_cameras():
+    if FilterGraph is not None:
+        try:
+            graph = FilterGraph()
+            names = graph.get_input_devices()
+            return [(idx, str(name)) for idx, name in enumerate(names)]
+        except Exception as e:
+            logger.warning("Pygrabber camera list failed: %s", e)
+
+    cameras = []
+    for idx in range(10):
+        cap = cv2.VideoCapture(idx)
+        try:
+            if cap.isOpened():
+                cameras.append((idx, f"Kamera {idx}"))
+        finally:
+            cap.release()
+    return cameras
+
+
+def select_camera_index() -> int:
+    cameras = list_available_cameras()
+    if not cameras:
+        raise RuntimeError("No Camera found")
+
+    root = tk.Tk()
+    root.withdraw()
+
+    popup_w = 360
+    popup_h = 300
+    result = {"index": None}
+
+    popup = tk.Toplevel()
+    popup.title("Kamera auswählen")
+    popup.geometry(f"{popup_w}x{popup_h}")
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.protocol("WM_DELETE_WINDOW", popup.destroy)
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup_w) // 2
+    y = (popup.winfo_screenheight() - popup_h) // 2
+    popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
+
+    frame = tk.Frame(popup, padx=12, pady=12)
+    frame.pack(fill="both", expand=True)
+    tk.Label(frame, text="Verfügbare Kameras:").pack(anchor="w", pady=(0, 8))
+
+    listbox = tk.Listbox(frame, height=10)
+    for cam_idx, cam_name in cameras:
+        listbox.insert(tk.END, f"[{cam_idx}] {cam_name}")
+    listbox.pack(fill="both", expand=True)
+    listbox.selection_set(0)
+
+    def choose():
+        sel = listbox.curselection()
+        if not sel:
+            return
+        result["index"] = cameras[sel[0]][0]
+        popup.destroy()
+
+    btn_row = tk.Frame(frame)
+    btn_row.pack(pady=(10, 0))
+    tk.Button(btn_row, text="Öffnen", width=14, command=choose).pack(side=tk.LEFT, padx=6)
+    tk.Button(btn_row, text="Abbrechen", width=14, command=popup.destroy).pack(side=tk.LEFT, padx=6)
+
+    popup.focus_force()
+    popup.wait_window()
+
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+    if result["index"] is None:
+        raise RuntimeError("Kameraauswahl abgebrochen.")
+    return result["index"]
 
 def red_mask(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -234,4 +319,6 @@ async def main(cam_index: int = 0):
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+
+    selected_camera = select_camera_index()
+    asyncio.run(main(selected_camera))

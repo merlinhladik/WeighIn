@@ -6,11 +6,21 @@ import base64
 import json
 import asyncio
 import time
-import queue
 import tkinter as tk
+from typing import Optional, List, Tuple
 from wsclient import WebSocketClient, QRClient
 import keyboard
 import logging
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
+try:
+    from pygrabber.dshow_graph import FilterGraph
+except Exception:
+    FilterGraph = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,6 +28,7 @@ logger = logging.getLogger(__name__)
 URL = "ws://localhost:8765"
 COOLDOWN_S = 1.0
 SCAN_HINT = "Bitte den QR scannen und hier nichts eintippen"
+QR_ERROR_TEXT = "Error: Qr kann nicht erkannt werden"
 
 
 def base64url_decode(data: str) -> bytes:
@@ -58,23 +69,126 @@ class ScanPopup:
         self._placeholder_active = False
         self._open_requested = threading.Event()
         self._hide_requested = threading.Event()
+        self._selected_camera_index: Optional[int] = None
+        self._camera_only_mode = False
+        self._camera_cap = None
+        self._camera_detector = cv2.QRCodeDetector() if cv2 is not None else None
+        self._last_camera_emit_ts = 0.0
+        self._camera_window_name = "QR Kamera Live"
 
         self._hotkey_handle = keyboard.add_hotkey("F12", self._on_hotkey_press)
         self._esc_handle = keyboard.add_hotkey("esc", self._on_escape_press)
 
     def _on_hotkey_press(self):
+        if self._camera_only_mode:
+            return
         self._open_requested.set()
 
     def _on_escape_press(self):
         self._hide_requested.set()
 
     def process_requests(self):
+        if self._camera_only_mode:
+            self._poll_live_camera()
         if self._open_requested.is_set():
             self._open_requested.clear()
             self.open()
         if self._hide_requested.is_set():
             self._hide_requested.clear()
             self.hide()
+
+    # trim because qr scanner works somehow only then
+    @staticmethod
+    def _trim_camera_qr_text(text: str) -> str:
+        if len(text) > 172:
+            return text[73:-99]
+        return text
+
+    def _show_camera_open_failed_dialog(self):
+        popup = tk.Toplevel()
+        popup.title("Kamera")
+        popup.attributes("-topmost", True)
+        popup.resizable(False, False)
+        tk.Label(popup, text="Kamera kann nicht geöffnet werden").pack(padx=20, pady=14)
+        tk.Button(popup, text="OK", width=10, command=popup.destroy).pack(pady=(0, 12))
+        popup.update_idletasks()
+        x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
+        y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
+        popup.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        popup.focus_force()
+        popup.wait_window()
+
+    def _enable_camera_only_mode(self, camera_index: int) -> bool:
+        if cv2 is None:
+            self._show_camera_open_failed_dialog()
+            return False
+
+        if self._camera_cap is not None:
+            try:
+                self._camera_cap.release()
+            except Exception:
+                pass
+            self._camera_cap = None
+
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            logger.warning("Failed to open camera index %s", camera_index)
+            cap.release()
+            self._show_camera_open_failed_dialog()
+            return False
+
+        self._camera_cap = cap
+        self._selected_camera_index = camera_index
+        self._camera_only_mode = True
+        self._open_requested.clear()
+        self.hide()
+        if self._hotkey_handle is not None:
+            keyboard.remove_hotkey(self._hotkey_handle)
+            self._hotkey_handle = None
+        return True
+
+    def _ensure_live_camera(self) -> bool:
+        if cv2 is None or self._selected_camera_index is None:
+            return False
+        if self._camera_cap is not None and self._camera_cap.isOpened():
+            return True
+        self._camera_cap = cv2.VideoCapture(self._selected_camera_index)
+        if not self._camera_cap.isOpened():
+            logger.warning("Failed to open camera index %s", self._selected_camera_index)
+            self._camera_cap.release()
+            self._camera_cap = None
+            return False
+        return True
+
+    def _poll_live_camera(self):
+        if not self._ensure_live_camera() or self._camera_detector is None:
+            return
+
+        ok, frame = self._camera_cap.read()
+        if not ok or frame is None:
+            return
+
+        text, points, _ = self._camera_detector.detectAndDecode(frame)
+        cv2.imshow(self._camera_window_name, frame)
+        cv2.waitKey(1)
+
+        if points is None or not text:
+            return
+
+        text = self._trim_camera_qr_text(text).strip()
+        if not text:
+            return
+
+        try:
+            parse_dokume_qr(text)
+        except Exception:
+            return
+
+        now = time.time()
+        if now - self._last_camera_emit_ts < COOLDOWN_S:
+            return
+        self._last_camera_emit_ts = now
+        self.on_scan(text)
 
     def _add_placeholder(self):
         if not self.entry:
@@ -105,7 +219,7 @@ class ScanPopup:
         frame = tk.Frame(self.win, padx=12, pady=12)
         frame.pack(fill="both", expand=True)
 
-        self.entry = tk.Entry(frame, font=("Consolas", 14))
+        self.entry = tk.Entry(frame, font=("Rubik", 14))
         self.entry.pack(fill="x", expand=True)
 
         self.win.bind("<Escape>", lambda _event: self.hide())
@@ -134,36 +248,267 @@ class ScanPopup:
         if not self.entry:
             return
         scanned = self.entry.get().strip()
+        logger.info("Scan submitted: len=%s", len(scanned))
         self.entry.delete(0, tk.END)
         self.hide()
         if scanned and scanned != SCAN_HINT:
             self.on_scan(scanned)
 
+    def _show_qr_error_dialog(self) -> str:
+        popup_w = 420
+        popup_h = 170
+        result = {"action": "rescan"}
+
+        popup = tk.Toplevel()
+        popup.title("Fehler")
+        popup.geometry(f"{popup_w}x{popup_h}")
+        popup.resizable(False, False)
+        popup.attributes("-topmost", True)
+
+        popup.update_idletasks()
+        x = (popup.winfo_screenwidth() - popup_w) // 2
+        y = (popup.winfo_screenheight() - popup_h) // 2
+        popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
+        popup.deiconify()
+        popup.lift()
+
+        frame = tk.Frame(popup, padx=16, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            frame,
+            text=QR_ERROR_TEXT,
+            fg="red",
+            font=("Rubik", 11, "bold"),
+        ).pack(pady=(6, 18))
+
+        btn_row = tk.Frame(frame)
+        btn_row.pack()
+
+        def set_action(action: str):
+            result["action"] = action
+            popup.destroy()
+        popup.protocol("WM_DELETE_WINDOW", lambda: set_action("rescan"))
+
+        tk.Button(
+            btn_row,
+            text="Erneut scannen",
+            width=18,
+            command=lambda: set_action("rescan"),
+        ).pack(side=tk.LEFT, padx=6)
+
+        tk.Button(
+            btn_row,
+            text="Kamera nehmen",
+            width=18,
+            command=lambda: set_action("camera"),
+        ).pack(side=tk.LEFT, padx=6)
+
+        popup.focus_force()
+        popup.update()
+        popup.wait_window()
+        return result["action"]
+
+    def _list_cameras(self) -> List[Tuple[int, str]]:
+        if FilterGraph is not None:
+            try:
+                graph = FilterGraph()
+                names = graph.get_input_devices()
+                return [(idx, str(name)) for idx, name in enumerate(names)]
+            except Exception:
+                pass
+
+        if cv2 is None:
+            return []
+
+        fallback = []
+        for idx in range(10):
+            cap = cv2.VideoCapture(idx)
+            try:
+                if cap.isOpened():
+                    fallback.append((idx, f"Kamera {idx}"))
+            finally:
+                cap.release()
+        return fallback
+
+    def _select_camera_dialog(self) -> Optional[int]:
+        cameras = self._list_cameras()
+        if not cameras:
+            logger.warning("No camera devices found.")
+            notice = tk.Toplevel()
+            notice.title("Kamera")
+            notice.attributes("-topmost", True)
+            tk.Label(notice, text="Keine Kamera gefunden.").pack(padx=20, pady=14)
+            tk.Button(notice, text="OK", width=10, command=notice.destroy).pack(pady=(0, 12))
+            notice.update_idletasks()
+            x = (notice.winfo_screenwidth() - notice.winfo_width()) // 2
+            y = (notice.winfo_screenheight() - notice.winfo_height()) // 2
+            notice.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+            notice.focus_force()
+            notice.wait_window()
+            return None
+
+        popup_w = 360
+        popup_h = 300
+        result = {"index": None}
+
+        popup = tk.Toplevel()
+        popup.title("Kamera auswählen")
+        popup.geometry(f"{popup_w}x{popup_h}")
+        popup.resizable(False, False)
+        popup.attributes("-topmost", True)
+
+        popup.update_idletasks()
+        x = (popup.winfo_screenwidth() - popup_w) // 2
+        y = (popup.winfo_screenheight() - popup_h) // 2
+        popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
+        popup.deiconify()
+        popup.lift()
+
+        frame = tk.Frame(popup, padx=12, pady=12)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(frame, text="Verfügbare Kameras:").pack(anchor="w", pady=(0, 8))
+
+        listbox = tk.Listbox(frame, height=10)
+        for cam_idx, cam_name in cameras:
+            listbox.insert(tk.END, f"[{cam_idx}] {cam_name}")
+        listbox.pack(fill="both", expand=True)
+        listbox.selection_set(0)
+
+        btn_row = tk.Frame(frame)
+        btn_row.pack(pady=(10, 0))
+
+        def choose():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            result["index"] = cameras[sel[0]][0]
+            popup.destroy()
+
+        tk.Button(btn_row, text="Öffnen", width=14, command=choose).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_row, text="Abbrechen", width=14, command=popup.destroy).pack(side=tk.LEFT, padx=6)
+
+        popup.focus_force()
+        popup.update()
+        popup.wait_window()
+        return result["index"]
+
+    def _scan_qr_from_camera(self, camera_index: int) -> Optional[str]:
+        if cv2 is None:
+            logger.warning("OpenCV is not installed, camera QR scan unavailable.")
+            return None
+
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            logger.warning("Failed to open camera index %s", camera_index)
+            cap.release()
+            return None
+
+        detector = cv2.QRCodeDetector()
+        window_name = f"QR Kamera [{camera_index}]"
+
+        try:
+            while True:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    return None
+
+                text, points, _ = detector.detectAndDecode(frame)
+                if points is not None and text:
+                    text = self._trim_camera_qr_text(text)
+                    cv2.imshow(window_name, frame)
+                    cv2.waitKey(150)
+                    return text.strip()
+
+                cv2.imshow(window_name, frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
+                    return None
+        finally:
+            cap.release()
+            try:
+                cv2.destroyWindow(window_name)
+            except Exception:
+                cv2.destroyAllWindows()
+
+    def resolve_scanned_qr(self, scanned: str) -> Optional[dict]:
+        logger.info("Resolving scanned QR")
+        try:
+            return parse_dokume_qr(scanned)
+        except Exception as e:
+            logger.warning("Parse failed: %s", e)
+            logger.info("%r", scanned)
+
+        while True:
+            action = self._show_qr_error_dialog()
+            if action == "rescan":
+                self.open()
+                return None
+
+            while True:
+                camera_index = self._selected_camera_index
+                if camera_index is None:
+                    camera_index = self._select_camera_dialog()
+                if camera_index is None:
+                    self.open()
+                    return None
+
+                if self._enable_camera_only_mode(camera_index):
+                    return None
+
+                # Camera unavailable: force re-selection from list.
+                self._selected_camera_index = None
+
     def close(self):
-        keyboard.remove_hotkey(self._hotkey_handle)
+        if self._hotkey_handle is not None:
+            keyboard.remove_hotkey(self._hotkey_handle)
         keyboard.remove_hotkey(self._esc_handle)
+        if self._camera_cap is not None:
+            self._camera_cap.release()
+            self._camera_cap = None
+            try:
+                cv2.destroyWindow(self._camera_window_name)
+            except Exception:
+                pass
         if self.win and self.win.winfo_exists():
             self.win.destroy()
 
 
-def read_scanner_lines_blocking():
+async def main():
+    ws = WebSocketClient(URL)
+    await ws.connect()
+    qr_client = QRClient(ws)
+    logger.info("WS connected: %s", URL)
     root = tk.Tk()
     root.withdraw()
-    scanned_lines: queue.Queue[str] = queue.Queue()
-    popup = ScanPopup(root, scanned_lines.put)
+    send_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    def on_scan(scanned: str):
+        try:
+            info = popup.resolve_scanned_qr(scanned)
+            if info is not None:
+                send_queue.put_nowait(info)
+        except Exception:
+            logger.exception("on_scan failed")
+
+    popup = ScanPopup(root, on_scan)
 
     try:
         while True:
             popup.process_requests()
             root.update_idletasks()
             root.update()
+
             try:
-                line = scanned_lines.get_nowait()
-            except queue.Empty:
-                time.sleep(0.01)
-                continue
-            if line:
-                yield line
+                while True:
+                    info = send_queue.get_nowait()
+                    await qr_client.send_qr(info)
+                    logger.info("Sent QR")
+            except asyncio.QueueEmpty:
+                pass
+
+            await asyncio.sleep(0.01)
     except tk.TclError:
         return
     finally:
@@ -172,44 +517,8 @@ def read_scanner_lines_blocking():
             root.destroy()
         except tk.TclError:
             pass
-
-async def main():
-    ws = WebSocketClient(URL)
-    await ws.connect()
-    qr_client = QRClient(ws)
-    logger.info("WS connected: %s", URL)
-
-    q: asyncio.Queue[str] = asyncio.Queue()
-    loop = asyncio.get_running_loop()
-
-    def scanner_thread():
-        try:
-            for line in read_scanner_lines_blocking():
-                loop.call_soon_threadsafe(q.put_nowait, line)
-        except Exception as e:
-            loop.call_soon_threadsafe(q.put_nowait, f"__ERROR__:{e}")
-
-    t = threading.Thread(target=scanner_thread, daemon=True)
-    t.start()
-
-    try:
-        while True:
-            scanned = await q.get()
-            if scanned.startswith("__ERROR__:"):
-                logger.error(scanned)
-                continue
-
-            try:
-                info = parse_dokume_qr(scanned)
-            except Exception as e:
-                logger.warning("Parse failed: %s", e)
-                logger.info("%r", scanned)
-                continue
-
-            await qr_client.send_qr(info)
-            logger.info("Sent QR")
-    finally:
         await ws.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -11,6 +11,8 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import websockets
+import weight
+import real_scanner
 try:
     import keyboard
 except Exception:
@@ -40,24 +42,21 @@ THEME = {
     "input_fg": "#f0f0f2",  # text
     "success": "#4CCD70",   # PO Palette: Emerald
     "error": "#B7413F",     # Option 3: Earthy Brick Red
-    "maennlich" : "#22AAF0",# PO Palette: Fresh Sky
+    "männlich" : "#22AAF0", # PO Palette: Fresh Sky
     "weiblich" : "#E590E8"  # PO Palette: Violet
 }
 
 
 
 class WeighingApp(tk.Tk):
-    
     def __init__(self):
         super().__init__()
         self.title("Judo Weighing Station")
-        try:
-            self.state("zoomed")
-        except Exception:
-            pass
+        width = self.winfo_screenwidth()
+        height = self.winfo_screenheight()
+        self.geometry(f"{width}x{height}+0+0")
         self.configure(bg=THEME["bg"])
         
-        # Data Storage
         self.participants: List[Dict[str, Any]] = []
         self.visible_participants: List[Dict[str, Any]] = []
         self.selected_participant: Optional[Dict[str, Any]] = None
@@ -68,7 +67,10 @@ class WeighingApp(tk.Tk):
         self.weight_popup_name_label: Optional[tk.Label] = None
         self.weight_popup_value_label: Optional[tk.Label] = None
         self.add_participant_popup: Optional[tk.Toplevel] = None
+        self.settings_popup: Optional[tk.Toplevel] = None
         self.add_participant_fields: Dict[str, Any] = {}
+        self.saved_form_snapshot: Optional[Dict[str, str]] = None
+        self.duplicate_warning_after_id: Optional[str] = None
         self.min_age_years: int = DEFAULT_MIN_AGE_YEARS
         self.max_age_years: int = DEFAULT_MAX_AGE_YEARS
         self.double_start_mode: str = "standard"
@@ -79,35 +81,32 @@ class WeighingApp(tk.Tk):
             "female": {"U13": 0.0, "U15": 0.0, "U18": 0.0, "Aktive": 0.0},
         }
 
-        # WebSocket server state (GUI acts as server)
         self.ws_loop: Optional[asyncio.AbstractEventLoop] = None
         self.ws_thread: Optional[threading.Thread] = None
         self.ws_server = None
         self.ws_clients = set()
+        self.qr_ws_clients = set()
+        self.external_program_threads: List[threading.Thread] = []
+        self.external_programs_started = False
          
         self.create_layout()
         self.load_settings()
         self.load_data()
         self.start_websocket_server()
         self.prompt_for_data_source_selection()
+        self.register_keyboard_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    
-    
 
     def create_action_buttons(self):
         """Creates the bottom navigation and action buttons."""
-        # Ensure we attach to the main container created in create_layout
         if not hasattr(self, 'main_container'):
-             # Fallback if called before main_container exists (shouldn't happen)
-             parent = self
-             pack_side = tk.BOTTOM
+            parent = self
+            pack_side = tk.BOTTOM
         else:
-             parent = self.main_container
-             pack_side = tk.BOTTOM
+            parent = self.main_container
+            pack_side = tk.BOTTOM
              
         btn_container = tk.Frame(parent, bg=THEME["bg"])
-        # Pack at the bottom with padding to separate from content above and window bottom
         btn_container.pack(side=pack_side, fill=tk.X, pady=(20, 30))
 
         btn_opts = {
@@ -116,13 +115,11 @@ class WeighingApp(tk.Tk):
             "relief": "flat", "height": 2, "cursor": "hand2"
         }
         
-        # Button 3: Save Weight (Update Participant)
-        tk.Button(btn_container, text="Speichern", command=self.save_weight, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
+        self.btn_save = tk.Button(btn_container, text="Speichern", command=self.save, width=18, **btn_opts)
+        self.btn_save.pack(side=tk.LEFT, padx=5)
 
-        # Button 5: Read from Scale (Mock Simulation)
         tk.Button(btn_container, text="Gewicht nehmen", command=self.read_scale, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
 
-        # Settings
         tk.Button(btn_container, text="Einstellungen", command=self.open_settings_window, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
         double_start_btn_opts = dict(btn_opts)
         double_start_btn_opts.update(
@@ -142,7 +139,6 @@ class WeighingApp(tk.Tk):
         )
         self.btn_double_start.pack(side=tk.LEFT, padx=5)
 
-        # Configuration for the Add Participant button (Secondary Action)
         add_btn_opts = dict(btn_opts)
         add_btn_opts.update(
             {
@@ -162,7 +158,6 @@ class WeighingApp(tk.Tk):
         )
         self.btn_add.pack(side=tk.RIGHT, padx=5)
 
-        # Configuration for the Delete Participant button (Destructive Action)
         delete_btn_opts = dict(btn_opts)
         delete_btn_opts.update(
             {
@@ -181,7 +176,6 @@ class WeighingApp(tk.Tk):
         )
         self.btn_delete.pack(side=tk.RIGHT, padx=5)
 
-        # UI Element: Warning panel displayed when multiple participants match a search query.
         self.duplicate_warning_frame = tk.Frame(
             self.main_container,
             bg=THEME["error"],
@@ -232,12 +226,6 @@ class WeighingApp(tk.Tk):
         )
         lbl.grid(row=r, column=c, padx=14, pady=pady, sticky="n")
 
-    def create_value(self, parent, text, r, c, pady=(5, 20)):
-        """Creates a read-only value label at the specified grid position."""
-        lbl = tk.Label(parent, text=text, bg=THEME["bg"], fg="gray", font=("Rubik", 16))
-        lbl.grid(row=r, column=c, padx=14, pady=pady, sticky="n")
-        return lbl
-
     def create_entry_value(self, parent, r, c):
         """Creates an editable entry field at the specified grid position."""
         entry = tk.Entry(parent, bg=THEME["input_bg"], fg="#f0f0f2", font=("Rubik", 14), justify="left", width=FIELD_WIDTH)
@@ -279,28 +267,157 @@ class WeighingApp(tk.Tk):
 
     @staticmethod
     def normalize_ui_gender(value: Any) -> str:
-        """Maps stored gender values to UI values (maennlich/weiblich)."""
+        """Maps stored gender values to UI values (männlich/weiblich)."""
         v = str(value or "").strip().lower()
-        if v in {"m", "male", "mann", "maennlich", "maenlich"}:
-            return "maennlich"
+        if v in {"m", "male", "mann", "männlich"}:
+            return "männlich"
         if v in {"w", "f", "female", "frau", "weiblich"}:
             return "weiblich"
-        return "weiblich"
+        return "männlich"
 
     @staticmethod
     def normalize_json_gender(value: Any) -> str:
         """Maps UI or legacy gender values to storage values (m/w)."""
-        return "m" if WeighingApp.normalize_ui_gender(value) == "maennlich" else "w"
+        return "m" if WeighingApp.normalize_ui_gender(value) == "männlich" else "w"
 
     def update_status_dropdown_colors(self, *args):
         """Updates dropdown backgrounds to reflect status selection."""
-        valid_color = THEME["success"] if self.valid_var.get() == "gueltig" else THEME["error"]
+        valid_color = THEME["success"] if self.valid_var.get() == "gültig" else THEME["error"]
         paid_color = THEME["success"] if self.paid_var.get() == PAID else THEME["error"]
-        gender_color = THEME["maennlich"] if self.gender_var.get() == "maennlich" else THEME["weiblich"]
+        gender_color = THEME["männlich"] if self.gender_var.get() == "männlich" else THEME["weiblich"]
 
         self.val_valid.config(bg=valid_color)
         self.val_paid.config(bg=paid_color)
         self.val_gender.config(bg=gender_color)
+        self.update_save_button_state()
+
+    @staticmethod
+    def parse_weight(value: Any) -> Optional[float]:
+        """Parses and validates weight input."""
+        txt = str(value or "").strip()
+        if not txt:
+            return None
+        txt = txt.replace(",", ".")
+        try:
+            parsed = float(txt)
+        except ValueError:
+            return None
+        if parsed < 0:
+            return None
+        return parsed
+
+    def get_form_snapshot(self) -> Dict[str, str]:
+        """Returns current editable form state for dirty-checking."""
+        mode_value = ""
+        birth_year_txt = self.val_birthyear.get().strip() if hasattr(self, "val_birthyear") else ""
+        if birth_year_txt.isdigit() and self.is_birth_year_double_start_eligible(int(birth_year_txt)):
+            mode_value = self.get_saved_double_start_mode()
+        return {
+            "Firstname": self.val_prename.get().strip(),
+            "Lastname": self.val_surname.get().strip(),
+            "Club": self.val_club.get().strip(),
+            "Birthyear": self.val_birthyear.get().strip(),
+            "Weight": self.weight_var.get().strip(),
+            "Gender": self.gender_var.get().strip(),
+            "Valid": self.valid_var.get().strip(),
+            "Paid": self.paid_var.get().strip(),
+            "Mode": mode_value,
+        }
+
+    def is_form_invalid(self) -> bool:
+        """Checks if one or more required inputs are empty or invalid."""
+        required_values = [
+            self.val_prename.get().strip(),
+            self.val_surname.get().strip(),
+            self.val_club.get().strip(),
+            self.val_birthyear.get().strip(),
+            self.weight_var.get().strip(),
+        ]
+        if any(not value for value in required_values):
+            return True
+
+        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
+        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
+        if WeighingApp.parse_birth_year(self.val_birthyear.get().strip(), min_age, max_age) is None:
+            return True
+        if WeighingApp.parse_weight(self.weight_var.get()) is None:
+            return True
+        return False
+
+    def set_save_button_default_style(self):
+        """Restores save button style to existing default look."""
+        if hasattr(self, "btn_save"):
+            self.btn_save.config(
+                bg=THEME["input_bg"],
+                fg="#f0f0f2",
+                activebackground=THEME["input_bg"],
+                activeforeground="#f0f0f2",
+            )
+
+    def update_save_button_state(self, _event=None):
+        """Updates box border and save button color based on validity and dirty state."""
+        if not hasattr(self, "btn_save"):
+            return
+        if not self.selected_participant:
+            if hasattr(self, "details_box_frame"):
+                self.details_box_frame.config(
+                    highlightbackground="#f0f0f2",
+                    highlightcolor="#f0f0f2",
+                )
+            self.set_save_button_default_style()
+            if hasattr(self, "save_state_hint_label"):
+                self.save_state_hint_label.config(text="")
+            return
+
+        is_invalid = self.is_form_invalid()
+        is_dirty = self.saved_form_snapshot is not None and self.get_form_snapshot() != self.saved_form_snapshot
+
+        if is_invalid:
+            if hasattr(self, "details_box_frame"):
+                self.details_box_frame.config(
+                    highlightbackground=THEME["error"],
+                    highlightcolor=THEME["error"],
+                )
+            self.btn_save.config(
+                bg=THEME["error"],
+                fg="#f0f0f2",
+                activebackground=THEME["error"],
+                activeforeground="#f0f0f2",
+            )
+            if hasattr(self, "save_state_hint_label"):
+                self.save_state_hint_label.config(
+                    text="Ein oder mehrere Einträge sind leer oder falsch",
+                    fg=THEME["error"],
+                )
+            return
+
+        if is_dirty:
+            if hasattr(self, "details_box_frame"):
+                self.details_box_frame.config(
+                    highlightbackground="#FFD54A",
+                    highlightcolor="#FFD54A",
+                )
+            self.btn_save.config(
+                bg="#FFD54A",
+                fg="black",
+                activebackground="#FFD54A",
+                activeforeground="black",
+            )
+            if hasattr(self, "save_state_hint_label"):
+                self.save_state_hint_label.config(
+                    text="Bitte speichern Sie die Änderungen",
+                    fg="#FFD54A",
+                )
+            return
+
+        if hasattr(self, "details_box_frame"):
+            self.details_box_frame.config(
+                highlightbackground="#f0f0f2",
+                highlightcolor="#f0f0f2",
+            )
+        self.set_save_button_default_style()
+        if hasattr(self, "save_state_hint_label"):
+            self.save_state_hint_label.config(text="")
 
     @staticmethod
     def get_birth_year_text(p: Dict[str, Any]) -> str:
@@ -330,125 +447,6 @@ class WeighingApp(tk.Tk):
         if min_year <= year <= max_year:
             return year
         return None
-
-    def prompt_birth_year_correction(self, parent, initial_value: Any = "") -> int:
-        """Shows a blocking error dialog until a valid birth year is entered."""
-        now_year = datetime.now().year
-        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
-        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
-        min_year = now_year - max_age
-        max_year = now_year - min_age
-        placeholder = "Bitte neues Geburtsjahr eingeben"
-        result = {"year": None}
-        popup_w = 420
-        popup_h = 200
-
-        popup = tk.Toplevel(parent)
-        popup.title("Fehler")
-        popup.geometry(f"{popup_w}x{popup_h}")
-        popup.configure(bg=THEME["bg"])
-        popup.resizable(False, False)
-        popup.transient(parent)
-        if hasattr(popup, "update_idletasks"):
-            popup.update_idletasks()
-        try:
-            parent.update_idletasks()
-            parent_x = parent.winfo_rootx()
-            parent_y = parent.winfo_rooty()
-            parent_w = parent.winfo_width()
-            parent_h = parent.winfo_height()
-            x = parent_x + (parent_w - popup_w) // 2
-            y = parent_y + (parent_h - popup_h) // 2
-        except Exception:
-            screen_w = popup.winfo_screenwidth()
-            screen_h = popup.winfo_screenheight()
-            x = (screen_w - popup_w) // 2
-            y = (screen_h - popup_h) // 2
-        popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
-        popup.grab_set()
-
-        tk.Label(
-            popup,
-            text="Fehler: Geburtsjahr falsch",
-            bg=THEME["bg"],
-            fg=THEME["error"],
-            font=("Rubik", 12, "bold"),
-        ).pack(pady=(18, 8))
-
-        tk.Label(
-            popup,
-            text=f"Erlaubter Bereich: {min_year} bis {max_year}",
-            bg=THEME["bg"],
-            fg=THEME["fg"],
-            font=("Rubik", 10),
-        ).pack(pady=(0, 8))
-
-        entry = tk.Entry(
-            popup,
-            bg=THEME["input_bg"],
-            fg="#9A9A9A",
-            insertbackground="#f0f0f2",
-            font=("Rubik", 11),
-            justify="center",
-        )
-        entry.pack(fill=tk.X, padx=20, pady=(0, 8))
-
-        initial_txt = str(initial_value or "").strip()
-        if initial_txt:
-            entry.delete(0, tk.END)
-            entry.insert(0, initial_txt)
-            entry.config(fg="#f0f0f2")
-        else:
-            entry.insert(0, placeholder)
-
-        def on_focus_in(_event=None):
-            if entry.get() == placeholder:
-                entry.delete(0, tk.END)
-                entry.config(fg="#f0f0f2")
-
-        def on_focus_out(_event=None):
-            if not entry.get().strip():
-                entry.delete(0, tk.END)
-                entry.insert(0, placeholder)
-                entry.config(fg="#9A9A9A")
-
-        def on_ok(_event=None):
-            value = entry.get().strip()
-            if value == placeholder:
-                value = ""
-            parsed_year = WeighingApp.parse_birth_year(value, min_age, max_age)
-            if parsed_year is None:
-                messagebox.showerror(
-                    "Fehler",
-                    f"Geburtsjahr falsch.\nBitte Jahr zwischen {min_year} und {max_year} eingeben.",
-                    parent=popup,
-                )
-                entry.focus_set()
-                entry.selection_range(0, tk.END)
-                return
-            result["year"] = parsed_year
-            popup.grab_release()
-            popup.destroy()
-
-        entry.bind("<FocusIn>", on_focus_in)
-        entry.bind("<FocusOut>", on_focus_out)
-        entry.bind("<Return>", on_ok)
-        popup.bind("<Escape>", lambda _event: "break")
-        popup.protocol("WM_DELETE_WINDOW", lambda: None)
-
-        tk.Button(
-            popup,
-            text="OK",
-            command=on_ok,
-            bg=THEME["success"],
-            fg="black",
-            font=("Rubik", 10, "bold"),
-            width=10,
-        ).pack(pady=(6, 14))
-
-        entry.focus_set()
-        popup.wait_window()
-        return result["year"]
 
     def filter_qr(self, info: Any) -> Dict[str, Any]:
         """Normalizes QR info and combines first/last name to one display field."""
@@ -499,7 +497,6 @@ class WeighingApp(tk.Tk):
             e_birthyear.delete(0, tk.END)
             e_birthyear.insert(0, birth_year)
 
-        # Keep focus in popup for quick manual correction and saving.
         popup.lift()
         e_first.focus_set()
 
@@ -516,29 +513,6 @@ class WeighingApp(tk.Tk):
         """Returns participants matching search query."""
         return self.search_participants(query)
 
-    def apply_qr_search(self, name: str):
-        """Writes QR name into search, filters list and selects first hit."""
-        query = (name or "").strip()
-        if not query:
-            self.hide_duplicate_warning()
-            return
-
-        self.search_var.set(query) 
-        filtered = self.get_filtered_participants(query)
-        self.update_list(filtered)
-        if len(filtered) > 1:
-            self.show_duplicate_warning()
-        else:
-            self.hide_duplicate_warning()
-        if not filtered:
-            return
-
-        self.selected_participant = filtered[0]
-        self.listbox.selection_clear(0, tk.END)
-        self.listbox.selection_set(0)
-        self.listbox.activate(0)
-        self.listbox.see(0)
-        self.show_details(filtered[0])
 
     @staticmethod
     def _normalize_birth_year(value: Any) -> Optional[int]:
@@ -680,10 +654,9 @@ class WeighingApp(tk.Tk):
         q = (query or "").lower().strip()
         if not q:
             return self.participants
-
         q_tokens = q.split()
-        from difflib import SequenceMatcher
 
+        from difflib import SequenceMatcher
         results = []
 
         def token_match(text: str) -> bool:
@@ -731,44 +704,31 @@ class WeighingApp(tk.Tk):
         results.sort(key=lambda x: x[0], reverse=True)
 
         return [p for _, p in results]
-
-
-    def get_exact_name_matches(self, full_name: str) -> List[Dict[str, Any]]:
-        """Returns participants whose full name exactly matches query."""
-        target = " ".join(str(full_name).split()).strip().lower()
-        if not target:
-            return []
-
-        matches = []
-        for p in self.participants:
-            first = str(p.get("Firstname") or "").strip()
-            last = str(p.get("Lastname") or "").strip()
-            candidate = f"{first} {last}".strip()
-            if not candidate:
-                candidate = str(p.get("Name") or "").strip()
-
-            candidate = " ".join(candidate.split()).strip().lower()
-            if candidate == target:
-                matches.append(p)
-        return matches
-
     
     def show_duplicate_warning(self):
+        if self.duplicate_warning_after_id is not None:
+            self.after_cancel(self.duplicate_warning_after_id)
+            self.duplicate_warning_after_id = None
         self.duplicate_warning_frame.place(relx=0.5, rely=0.5, anchor="center")
         self.duplicate_warning_frame.lift()
+        self.duplicate_warning_after_id = self.after(5000, self.hide_duplicate_warning)
         
     def hide_duplicate_warning(self):
+        if self.duplicate_warning_after_id is not None:
+            self.after_cancel(self.duplicate_warning_after_id)
+            self.duplicate_warning_after_id = None
         self.duplicate_warning_frame.place_forget()
 
     def clear_participant_details(self):
         """Clears participant detail inputs in the main view."""
         self.selected_participant = None
+        self.saved_form_snapshot = None
         self.val_prename.delete(0, tk.END)
         self.val_surname.delete(0, tk.END)
         self.val_birthyear.delete(0, tk.END)
         self.val_club.delete(0, tk.END)
         self.weight_var.delete(0, tk.END)
-        self.valid_var.set("ungueltig")
+        self.valid_var.set("ungültig")
         self.paid_var.set(UNPAID)
         self.gender_var.set("weiblich")
         self.update_status_dropdown_colors()
@@ -776,6 +736,7 @@ class WeighingApp(tk.Tk):
             WeighingApp.update_tolerance_label(self)
         if hasattr(self, "update_double_start_visibility"):
             WeighingApp.update_double_start_visibility(self)
+        self.update_save_button_state()
     
     def filter_list(self, *args):
         """Filters the participant list based on the search bar input."""
@@ -832,26 +793,6 @@ class WeighingApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", f"Could not load data: {e}")         
 
-    @staticmethod
-    def fix_mojibake_text(value: Any) -> Any:
-        """Repairs common UTF-8/Latin-1 mojibake like 'MÃ¼ller' -> 'Müller'."""
-        if not isinstance(value, str):
-            return value
-
-        txt = value.strip()
-        if not txt:
-            return value
-
-        # Only attempt repair when suspicious marker chars are present.
-        if not any(marker in txt for marker in ["Ã", "â", "Â"]):
-            return value
-
-        try:
-            repaired = txt.encode("latin-1").decode("utf-8")
-            return repaired
-        except Exception:
-            return value
-
     def load_settings(self):
         """Applies startup defaults without loading persisted file settings."""
         self.weight_decimal_places = 0
@@ -904,8 +845,6 @@ class WeighingApp(tk.Tk):
                         continue
                     if isinstance(value, (int, float)):
                         klass_name = klass.strip()
-                        if klass_name.lower() == "senior":
-                            klass_name = "Aktive"
                         self.age_class_tolerance[g][klass_name] = float(value)
 
         raw_years = cfg.get("doubleStartYears", []) if isinstance(cfg, dict) else []
@@ -930,9 +869,8 @@ class WeighingApp(tk.Tk):
         """Updates the yellow status label above the QR scan hint."""
         if not hasattr(self, "double_start_status_label"):
             return
-        mode_label = "höher" if self.double_start_mode in {"hoeher", "höher"} else self.double_start_mode
         self.double_start_status_label.config(
-            text=f"Doppelstart: {mode_label}"
+            text=f"Doppelstart: {self.double_start_mode}"
         )
 
     def is_double_start_eligible(self) -> bool:
@@ -943,6 +881,19 @@ class WeighingApp(tk.Tk):
         if not txt.isdigit():
             return False
         return int(txt) in set(self.double_start_years or [])
+
+    def is_birth_year_double_start_eligible(self, birth_year: int) -> bool:
+        """Returns True when the given birth year is configured for double start."""
+        return int(birth_year) in set(self.double_start_years or [])
+
+    def get_saved_double_start_mode(self) -> str:
+        """Returns persisted mode value (standard, höher, doppel)."""
+        mode = str(self.double_start_mode or "").strip().lower()
+        if mode == "höher":
+            return "höher"
+        if mode == "doppel":
+            return "doppel"
+        return "standard"
 
     def update_double_start_visibility(self, *_args):
         """Shows/hides double-start button and status label for allowed birth years."""
@@ -991,7 +942,7 @@ class WeighingApp(tk.Tk):
         mode_var = tk.StringVar(value=self.double_start_mode)
         for value, text in [
             ("standard", "standard"),
-            ("hoeher", "höher"),
+            ("höher", "höher"),
             ("doppel", "doppel"),
         ]:
             tk.Radiobutton(
@@ -1015,6 +966,7 @@ class WeighingApp(tk.Tk):
         def apply_mode():
             self.double_start_mode = mode_var.get()
             self.update_double_start_label()
+            self.update_save_button_state()
             popup.destroy()
 
         tk.Button(
@@ -1054,14 +1006,14 @@ class WeighingApp(tk.Tk):
 
     def get_tolerance_for(self, gender_ui: str, age_class: str) -> Optional[float]:
         """Resolves tolerance by age class and gender with mixed fallback."""
-        cfg_key = "male" if gender_ui == "maennlich" else "female"
+        cfg_key = "male" if gender_ui == "männlich" else "female"
         val = self.age_class_tolerance.get(cfg_key, {}).get(age_class)
         if val is None and age_class == "Aktive":
-            val = self.age_class_tolerance.get(cfg_key, {}).get("Senior")
+            val = self.age_class_tolerance.get(cfg_key, {}).get("Aktive")
         if val is None:
             val = self.age_class_tolerance.get("mixed", {}).get(age_class)
         if val is None and age_class == "Aktive":
-            val = self.age_class_tolerance.get("mixed", {}).get("Senior")
+            val = self.age_class_tolerance.get("mixed", {}).get("Aktive")
         return val
 
     def update_tolerance_label(self, *_args):
@@ -1069,9 +1021,7 @@ class WeighingApp(tk.Tk):
         if not hasattr(self, "tolerance_hint_prefix_label") or not hasattr(self, "tolerance_hint_value_label"):
             return
 
-        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
-        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
-        birth_year = WeighingApp.parse_birth_year(self.val_birthyear.get().strip(), min_age, max_age)
+        birth_year = WeighingApp.parse_birth_year(self.val_birthyear.get().strip())
         if birth_year is None:
             self.tolerance_hint_prefix_label.config(text="")
             self.tolerance_hint_value_label.config(text="")
@@ -1087,7 +1037,7 @@ class WeighingApp(tk.Tk):
             return
 
         self.tolerance_hint_prefix_label.config(text=f"Toleranz ({age_class}):")
-        self.tolerance_hint_value_label.config(text=f"{tolerance:g} kg")
+        self.tolerance_hint_value_label.config(text=f"{tolerance:g} g")
 
     def prompt_for_data_source_selection(self):
         """Prompts user to choose a data source when app starts without one."""
@@ -1104,9 +1054,6 @@ class WeighingApp(tk.Tk):
 
     def show_details(self, p: Dict):
         """Populates the detail view with the selected participant's data."""
-
-        
-        # Name Parsing (Handle fallback logic for simplified mock data)
         full_name = str(p.get('Name', 'Unknown'))
         parts = full_name.split()
         if len(parts) > 1:
@@ -1116,11 +1063,9 @@ class WeighingApp(tk.Tk):
             prename = full_name
             surname = ""
             
-        # Prefer specific columns if available
         if 'Firstname' in p and pd.notna(p['Firstname']):
-             prename = p['Firstname']
+            prename = p['Firstname']
              
-        # Update Editable Fields
         self.val_prename.delete(0, tk.END)
         self.val_prename.insert(0, str(prename))
         
@@ -1132,17 +1077,13 @@ class WeighingApp(tk.Tk):
 
         self.val_club.delete(0, tk.END)
         self.val_club.insert(0, str(p.get("Club")))
-        
-        
-        
-        
 
         is_valid = self.to_bool(p.get(VALID_KEY, False))
         is_paid = self.to_bool(p.get(PAID_KEY, False))
         
         ui_gender = WeighingApp.normalize_ui_gender(p.get("Gender"))
 
-        self.valid_var.set("gueltig" if is_valid else "ungueltig")
+        self.valid_var.set("gültig" if is_valid else "ungültig")
         self.paid_var.set(PAID if is_paid else UNPAID)
         self.gender_var.set(ui_gender)
         self.update_status_dropdown_colors()
@@ -1154,7 +1095,8 @@ class WeighingApp(tk.Tk):
             WeighingApp.update_tolerance_label(self)
         if hasattr(self, "update_double_start_visibility"):
             WeighingApp.update_double_start_visibility(self)
-        # self.entry_weight.focus() # Auto-focus for immediate entry
+        self.saved_form_snapshot = self.get_form_snapshot()
+        self.update_save_button_state()
 
     def save_data(self):
         """Writes current participant data back to JSON."""
@@ -1173,7 +1115,7 @@ class WeighingApp(tk.Tk):
             messagebox.showwarning("Scale", "No scale client connected.")
             return
 
-        self.send_ws_payload({"type": "REQUEST_WEIGHT"})
+        self.send_weight_request()
 
     def trigger_qr_scan_hotkey(self, _event=None):
         """Triggers scanner popup hotkey (F12) from GUI click."""
@@ -1182,6 +1124,41 @@ class WeighingApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("QR Scan", f"F12 konnte nicht ausgelost werden: {e}")
 
+    def register_keyboard_shortcuts(self):
+        """Registers GUI-wide keyboard shortcuts."""
+        self.bind_all("<Control-s>", self.handle_save_shortcut)
+        self.bind_all("<Control-S>", self.handle_save_shortcut)
+        self.bind_all("<Return>", self.handle_delete_shortcut)
+
+    def _is_main_window_event(self, event) -> bool:
+        """Returns true when event belongs to the main app window."""
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            return True
+        try:
+            return widget.winfo_toplevel() is self
+        except Exception:
+            return False
+
+    def handle_save_shortcut(self, event=None):
+        """Handles Ctrl+S like the save button."""
+        if event is not None and not self._is_main_window_event(event):
+            return
+        self.save()
+        return "break"
+
+    def handle_delete_shortcut(self, event=None):
+        """Handles Enter: sends space and then backspace."""
+        if event is not None and not self._is_main_window_event(event):
+            return
+        if keyboard is not None:
+            try:
+                keyboard.press_and_release("space")
+                keyboard.press_and_release("backspace")
+            except Exception:
+                pass
+        return "break"
+
     def accept_pending_weight(self):
         """Accepts pending weight, writes it into the field, and saves immediately."""
         if self.pending_received_weight is None:
@@ -1189,7 +1166,7 @@ class WeighingApp(tk.Tk):
         formatted_weight = self.format_scale_weight(self.pending_received_weight)
         self.weight_var.delete(0, tk.END)
         self.weight_var.insert(0, formatted_weight)
-        self.save_weight()
+        self.save()
         self.pending_received_weight = None
         self.close_weight_popup()
 
@@ -1198,70 +1175,55 @@ class WeighingApp(tk.Tk):
         self.pending_received_weight = None
         self.close_weight_popup()
 
-    def save_weight(self):
+    def save(self):
         """Saves edited person data and weight to memory and JSON."""
         if not self.selected_participant:
             messagebox.showwarning("No selection", "Please select a participant first.")
             return
 
-        try:
-            weight = float(self.weight_var.get())
-            if weight < 0:
-                messagebox.showerror("Fehler", "Gewicht musst positiv sein")
-                return 
-        except ValueError:
-            messagebox.showerror("Fehler", "ungültiges Gewicht. Bitte ausschließlich Nummern eingeben")
+        parsed_weight = WeighingApp.parse_weight(self.weight_var.get())
+        if parsed_weight is None:
+            messagebox.showerror("Fehler", "Ungültiges Gewicht. Bitte nur Nummern eingeben.")
+            self.update_save_button_state()
             return
+        weight = parsed_weight
 
         first_name = self.val_prename.get().strip()
         last_name = self.val_surname.get().strip()
-        full_name = f"{first_name} {last_name}".strip()
+        club_txt = self.val_club.get().strip()
         birth_year_txt = self.val_birthyear.get().strip()
+        full_name = f"{first_name} {last_name}".strip()
+
+        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
+        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
+        parsed_year = WeighingApp.parse_birth_year(birth_year_txt, min_age, max_age)
+        if not first_name or not last_name or not club_txt or parsed_year is None:
+            messagebox.showerror("Fehler", "Bitte alle Felder korrekt ausfüllen.")
+            self.update_save_button_state()
+            return
 
         p = self.selected_participant
         p[WEIGHT_KEY] = weight
         p["Firstname"] = first_name
         p["Lastname"] = last_name
         p["Name"] = full_name
-        is_valid = self.valid_var.get() == "gueltig"
+        p["Club"] = club_txt
+        is_valid = self.valid_var.get() == "gültig"
         is_paid = self.paid_var.get() == PAID
         p["Gender"] = WeighingApp.normalize_json_gender(self.gender_var.get())
         p[VALID_KEY] = is_valid
         p[PAID_KEY] = is_paid
-        min_age = getattr(self, "min_age_years", DEFAULT_MIN_AGE_YEARS)
-        max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
-        parsed_year = WeighingApp.parse_birth_year(birth_year_txt, min_age, max_age)
-        if parsed_year is None:
-            parsed_year = self.prompt_birth_year_correction(self, birth_year_txt)
-            self.val_birthyear.delete(0, tk.END)
-            self.val_birthyear.insert(0, str(parsed_year))
         p[BIRTHYEAR_KEY] = parsed_year
-
-        p.pop("Gewicht (kg)", None)
-        p.pop("Gewicht", None)
-        p.pop("Gueltigkeit", None)
-        p.pop("Gueltig", None)
-        p.pop("Bezahlt", None)
-        p.pop("Birthdate", None)
-        p.pop("Birthday", None)
-        p.pop("BirthYear", None)
-        p.pop("Geburtsdatum", None)
-        p.pop("Geburtsjahr", None)
+        if self.is_birth_year_double_start_eligible(parsed_year):
+            p["mode"] = self.get_saved_double_start_mode()
+        else:
+            p.pop("mode", None)
 
         try:
             self.save_data()
             self.update_list(self.participants)
-            self.send_ws_payload(
-                {
-                    "type": "WEIGH_IN",
-                    "participant_id": p.get("ID"),
-                    "name": full_name,
-                    "weight": weight,
-                    "valid": is_valid,
-                    "paid": is_paid,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
+            self.saved_form_snapshot = self.get_form_snapshot()
+            self.update_save_button_state()
             messagebox.showinfo("Saved", f"Updated: {full_name}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not save data: {e}")
@@ -1304,7 +1266,7 @@ class WeighingApp(tk.Tk):
             return
 
         popup = tk.Toplevel(self)
-        popup.title("Add New Participant")
+        popup.title("Neuen Teilnehmer hinzufügen")
         popup.geometry("400x420")
         popup.configure(bg=THEME["bg"])
         self.add_participant_popup = popup
@@ -1329,10 +1291,10 @@ class WeighingApp(tk.Tk):
         e_birthyear.pack(fill=tk.X, padx=20)
 
         tk.Label(popup, text="Gender", **lbl_style).pack(pady=(10, 5))
-        gender_var = tk.StringVar(value="maennlich")
+        gender_var = tk.StringVar(value="männlich")
         g_frame = tk.Frame(popup, bg=THEME["bg"])
         g_frame.pack()
-        tk.Radiobutton(g_frame, text="maennlich", variable=gender_var, value="maennlich",
+        tk.Radiobutton(g_frame, text="männlich", variable=gender_var, value="männlich",
                        bg=THEME["bg"], fg=THEME["fg"], selectcolor=THEME["secondary"]).pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(g_frame, text="weiblich", variable=gender_var, value="weiblich",
                        bg=THEME["bg"], fg=THEME["fg"], selectcolor=THEME["secondary"]).pack(side=tk.LEFT, padx=10)
@@ -1393,9 +1355,17 @@ class WeighingApp(tk.Tk):
         max_age = getattr(self, "max_age_years", DEFAULT_MAX_AGE_YEARS)
         birth_year = WeighingApp.parse_birth_year(birth_year_txt, min_age, max_age)
         if birth_year is None:
-            birth_year = self.prompt_birth_year_correction(popup, birth_year_txt)
-            e_birthyear.delete(0, tk.END)
-            e_birthyear.insert(0, str(birth_year))
+            now_year = datetime.now().year
+            min_year = now_year - max_age
+            max_year = now_year - min_age
+            messagebox.showerror(
+                "Fehler",
+                f"Geburtsjahr falsch.\nBitte Jahr zwischen {min_year} und {max_year} eingeben.",
+                parent=popup,
+            )
+            e_birthyear.focus_set()
+            e_birthyear.selection_range(0, tk.END)
+            return
 
         ids: List[int] = []
         for p in self.participants:
@@ -1431,9 +1401,15 @@ class WeighingApp(tk.Tk):
 
     def open_settings_window(self):
         """Opens a dialog to configure app settings."""
+        if self.settings_popup and self.settings_popup.winfo_exists():
+            self.settings_popup.lift()
+            self.settings_popup.focus_force()
+            return
+
         popup_w = 520
         popup_h = 360
         popup = tk.Toplevel(self)
+        self.settings_popup = popup
         popup.title("Einstellungen")
         popup.geometry(f"{popup_w}x{popup_h}")
         popup.configure(bg=THEME["bg"])
@@ -1535,6 +1511,11 @@ class WeighingApp(tk.Tk):
             width=20,
         ).pack(pady=(8, 4))
 
+        def _on_settings_close():
+            if popup == self.settings_popup:
+                self.settings_popup = None
+            popup.destroy()
+
         def save_and_close():
             try:
                 selected_places = int(decimal_var.get())
@@ -1549,7 +1530,7 @@ class WeighingApp(tk.Tk):
             if self.pending_received_weight is not None and self.weight_popup is not None and self.weight_popup.winfo_exists():
                 self.show_weight_popup(self.pending_received_weight)
 
-            popup.destroy()
+            _on_settings_close()
 
         button_frame = tk.Frame(popup, bg=THEME["bg"])
         button_frame.pack(pady=10)
@@ -1567,12 +1548,13 @@ class WeighingApp(tk.Tk):
         tk.Button(
             button_frame,
             text="Cancel",
-            command=popup.destroy,
+            command=_on_settings_close,
             bg=THEME["error"],
             fg="#f0f0f2",
             font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=8)
+        popup.protocol("WM_DELETE_WINDOW", _on_settings_close)
 
     def start_websocket_server(self):
         """Starts the GUI WebSocket server on ws://localhost:8765."""
@@ -1595,6 +1577,7 @@ class WeighingApp(tk.Tk):
         try:
             self.ws_server = self.ws_loop.run_until_complete(self._start_ws_server())
             print(f"[WebSocket] Server running on ws://{WS_HOST}:{WS_PORT}")
+            self.after(0, self.start_external_programs)
             self.ws_loop.run_forever()
         except Exception as e:
             print(f"[WebSocket] Server start failed: {e}")
@@ -1615,6 +1598,36 @@ class WeighingApp(tk.Tk):
         """Starts websockets.serve inside a running event loop."""
         return await websockets.serve(self._ws_handler, WS_HOST, WS_PORT)
 
+    def start_external_programs(self):
+        """Starts the scanner and weight clients once after the GUI websocket server is ready."""
+        if self.external_programs_started:
+            return
+
+        self.external_programs_started = True
+        runners = [
+            ("weight", self._run_weight_program),
+            ("real_scanner", self._run_real_scanner_program),
+        ]
+
+        for name, target in runners:
+            thread = threading.Thread(target=target, name=f"{name}-thread", daemon=True)
+            thread.start()
+            self.external_program_threads.append(thread)
+
+    def _run_weight_program(self):
+        """Runs the scale client in its own thread."""
+        try:
+            asyncio.run(weight.main())
+        except Exception as exc:
+            print(f"[Weight] Program stopped: {exc}")
+
+    def _run_real_scanner_program(self):
+        """Runs the QR scanner client in its own thread."""
+        try:
+            asyncio.run(real_scanner.main())
+        except Exception as exc:
+            print(f"[Scanner] Program stopped: {exc}")
+
     async def _ws_handler(self, websocket, path=None):
         """Handles inbound messages from connected clients."""
         self.ws_clients.add(websocket)
@@ -1633,13 +1646,11 @@ class WeighingApp(tk.Tk):
 
                 msg_type = payload.get("type")
                 if msg_type == "qr":
+                    self.qr_ws_clients.add(websocket)
                     msg_info = payload.get("info")
                     qr_data = self.filter_qr(msg_info)
                     self.after(0, lambda data=qr_data: self.handle_incoming_qr(data))
                     print(f"[WebSocket] QR: {qr_data}")
-                    await websocket.send(
-                        json.dumps({"type": "ack", "message": "qr accepted", "qr": qr_data})
-                    )
                     continue
 
                 elif msg_type != "weight":
@@ -1682,6 +1693,7 @@ class WeighingApp(tk.Tk):
         except Exception as e:
             print(f"[WebSocket] Client error: {e}")
         finally:
+            self.qr_ws_clients.discard(websocket)
             self.ws_clients.discard(websocket)
 
     def apply_received_weight(self, weight: int):
@@ -1806,24 +1818,26 @@ class WeighingApp(tk.Tk):
         self.weight_popup_name_label = None
         self.weight_popup_value_label = None
 
-    def send_ws_payload(self, payload: Dict[str, Any]):
-        """Broadcasts a payload to all connected WebSocket clients."""
+    def send_weight_request(self):
+        """Sends REQUEST_WEIGHT only to non-QR WebSocket clients."""
         if not self.ws_loop or not self.ws_clients:
             return
-        asyncio.run_coroutine_threadsafe(self._broadcast_payload(payload), self.ws_loop)
+        asyncio.run_coroutine_threadsafe(self._send_weight_request(), self.ws_loop)
 
-    async def _broadcast_payload(self, payload: Dict[str, Any]):
-        """Async helper to broadcast JSON payloads."""
-        if not self.ws_clients:
+    async def _send_weight_request(self):
+        """Async helper to request a weight value from the connected scale client."""
+        candidate_clients = [client for client in self.ws_clients if client not in self.qr_ws_clients]
+        if not candidate_clients:
             return
-        msg = json.dumps(payload, ensure_ascii=False)
+        msg = json.dumps({"type": "REQUEST_WEIGHT"}, ensure_ascii=False)
         stale = []
-        for client in self.ws_clients:
+        for client in candidate_clients:
             try:
                 await client.send(msg)
             except Exception:
                 stale.append(client)
         for client in stale:
+            self.qr_ws_clients.discard(client)
             self.ws_clients.discard(client)
 
     def stop_websocket_server(self):
@@ -1852,6 +1866,12 @@ class WeighingApp(tk.Tk):
 
     def on_close(self):
         """Handles GUI shutdown."""
+        try:
+            self.unbind_all("<Control-s>")
+            self.unbind_all("<Control-S>")
+            self.unbind_all("<Return>")
+        except Exception:
+            pass
         self.close_weight_popup()
         self.stop_websocket_server()
         self.destroy()
@@ -1863,18 +1883,18 @@ class WeighingApp(tk.Tk):
         # --- Sidebar (Left Panel) ---
         sidebar = tk.Frame(self, bg=THEME["secondary"], width=300)
         sidebar.pack(side=tk.LEFT, fill=tk.Y)
-        sidebar.pack_propagate(False) # Prevent shrinking
+        sidebar.pack_propagate(False)
 
 
         # Search Input
         self.search_var = tk.StringVar()
-        self.search_var.trace("w", self.filter_list) # Bind text change to filter function
+        self.search_var.trace("w", self.filter_list)
         search_entry = tk.Entry(sidebar, textvariable=self.search_var, bg=THEME["input_bg"], 
                                 fg=THEME["input_fg"], insertbackground="#f0f0f2", font=("Rubik", 12))
         search_entry.pack(fill=tk.X, padx=10, pady=(18, 20), ipady=6)
 
 
-        # Participant Listbox (Scrollable)
+        # Participant Listbox 
         list_frame = tk.Frame(sidebar, bg=THEME["secondary"])
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
         
@@ -1897,13 +1917,29 @@ class WeighingApp(tk.Tk):
         # Create Action Buttons Button BEFORE the expanding center box
         self.create_action_buttons()
 
-        container = self.main_container # Alias for existing code
+        container = self.main_container
 
         # Central Information Box
-        box_frame = tk.Frame(container, bg=THEME["bg"], highlightbackground="#f0f0f2", highlightthickness=2)
+        box_frame = tk.Frame(
+            container,
+            bg=THEME["bg"],
+            highlightbackground="#f0f0f2",
+            highlightcolor="#f0f0f2",
+            highlightthickness=2,
+        )
+        self.details_box_frame = box_frame
         box_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 40))
+        self.save_state_hint_label = tk.Label(
+            box_frame,
+            text="",
+            bg=THEME["bg"],
+            fg="#f0f0f2",
+            font=("Rubik", 11, "bold"),
+            anchor="center",
+            justify="center",
+        )
+        self.save_state_hint_label.place(relx=0.5, y=8, anchor="n")
 
-        # Grid Configuration
         box_frame.columnconfigure(0, weight=1)
         box_frame.columnconfigure(1, weight=1)
 
@@ -1925,14 +1961,13 @@ class WeighingApp(tk.Tk):
         self.weight_var = self.create_entry_value(box_frame, 3, 0)
         self.val_club = self.create_entry_value(box_frame, 3, 1)
 
-
         tolerance_row = tk.Frame(box_frame, bg=THEME["bg"])
         tolerance_row.grid(row=4, column=0, padx=14, pady=(0, 10), sticky="n")
         self.tolerance_hint_prefix_label = tk.Label(
             tolerance_row,
             text="",
             bg=THEME["bg"],
-            fg="#FFD54A",
+            fg="#f0f0f2",
             font=("Rubik", 12, "bold"),
             width=20,
             anchor="w",
@@ -1943,7 +1978,7 @@ class WeighingApp(tk.Tk):
             tolerance_row,
             text="",
             bg=THEME["bg"],
-            fg="#FFD54A",
+            fg="#f0f0f2",
             font=("Rubik", 12, "bold"),
             anchor="w",
             justify="left",
@@ -1958,19 +1993,18 @@ class WeighingApp(tk.Tk):
         self.val_birthyear = self.create_entry_value(box_frame, 6, 0)
         self.gender_var = tk.StringVar()
         self.val_gender = self.create_status_dropdown(
-            box_frame, self.gender_var, ["maennlich", "weiblich"], 6, 1
+            box_frame, self.gender_var, ["männlich", "weiblich"], 6, 1
         )
 
         # Row 7: Status Labels
-        self.create_label(box_frame, "ist gültig:", 7, 0)
-        self.create_label(box_frame, "hat gezahlt:", 7, 1)
+        self.create_label(box_frame, "Gültigkeit:", 7, 0)
+        self.create_label(box_frame, "Zahlung:", 7, 1)
         
         # Row 8: Status Values (Color-coded)
-        # Adding extra bottom padding to prevent sticking to the box border
-        self.valid_var = tk.StringVar(value="ungueltig")
+        self.valid_var = tk.StringVar(value="ungültig")
         self.paid_var = tk.StringVar(value=UNPAID)
         self.val_valid = self.create_status_dropdown(
-            box_frame, self.valid_var, ["gueltig", "ungueltig"], 8, 0
+            box_frame, self.valid_var, ["gültig", "ungültig"], 8, 0
         )
         self.val_paid = self.create_status_dropdown(
             box_frame, self.paid_var, [PAID, UNPAID], 8, 1
@@ -1990,7 +2024,6 @@ class WeighingApp(tk.Tk):
             self.val_birthyear.bind("<KeyRelease>", double_start_callback)
             self.val_birthyear.bind("<FocusOut>", double_start_callback)
 
-        # Scan hint at the bottom of the white content box.
         self.double_start_status_label = tk.Label(
             box_frame,
             text=f"Doppelstart: {self.double_start_mode}",
@@ -2007,7 +2040,7 @@ class WeighingApp(tk.Tk):
         hint_frame.grid(row=10, column=0, columnspan=2, padx=14, pady=(8, 18), sticky="sew")
         scan_hint_label = tk.Label(
             hint_frame,
-            text="Drücke F12 um den QR Code zu scannen",
+            text="Drücke F12 oder hier um den QR Code zu scannen",
             bg=THEME["accent"],
             fg="black",
             font=("Rubik", 11, "bold"),
@@ -2018,14 +2051,10 @@ class WeighingApp(tk.Tk):
         scan_hint_label.pack(fill=tk.X)
         scan_hint_label.bind("<Button-1>", self.trigger_qr_scan_hotkey)
         self.update_double_start_visibility()
-
-        # --- Action Buttons (Bottom) ---
-        # self.create_action_buttons() # Moved to top
-
-
-
+        for entry_widget in [self.val_prename, self.val_surname, self.weight_var, self.val_club, self.val_birthyear]:
+            entry_widget.bind("<KeyRelease>", self.update_save_button_state, add="+")
+            entry_widget.bind("<FocusOut>", self.update_save_button_state, add="+")
 
 if __name__ == "__main__":
     app = WeighingApp()
     app.mainloop()
-
