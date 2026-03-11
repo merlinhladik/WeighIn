@@ -1,27 +1,28 @@
-# SPDX-FileCopyrightText: 2026 TOP Team Combat Control
-# SPDX-License-Identifier: GPL-3.0-or-later
-
 import subprocess
+import os
 import sys
 
 
-
 def main():
-    processes = []
+    base = os.path.dirname(sys.executable)
 
-    gui = subprocess.Popen([sys.executable, "gui.py"])
-    processes.append(gui)
+    if sys.platform.startswith("win"):
+        gui_name = "gui.exe"
+        weight_name = "weight.exe"
+        scanner_name = "real_scanner.exe"
+    else:
+        gui_name = "gui"
+        weight_name = "weight"
+        scanner_name = "real_scanner"
 
-    weight = subprocess.Popen([sys.executable, "weight.py"])
-    processes.append(weight)
-
-    scanner = subprocess.Popen([sys.executable, "real_scanner.py"])
-    processes.append(scanner)
+    gui = subprocess.Popen([os.path.join(base, gui_name)])
+    weight = subprocess.Popen([os.path.join(base, weight_name)])
+    scanner = subprocess.Popen([os.path.join(base, scanner_name)])
 
     gui.wait()
 
-    for p in processes[1:]:
-        p.terminate()
+    weight.kill()
+    scanner.kill()
 
 
 if __name__ == "__main__":

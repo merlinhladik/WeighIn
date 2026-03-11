@@ -75,12 +75,14 @@ class ScanPopup:
         self._camera_detector = cv2.QRCodeDetector() if cv2 is not None else None
         self._last_camera_emit_ts = 0.0
         self._camera_window_name = "QR Kamera Live"
+        self._camera_window_visible = False
 
         self._hotkey_handle = keyboard.add_hotkey("F12", self._on_hotkey_press)
         self._esc_handle = keyboard.add_hotkey("esc", self._on_escape_press)
 
     def _on_hotkey_press(self):
         if self._camera_only_mode:
+            self._camera_window_visible = True
             return
         self._open_requested.set()
 
@@ -140,11 +142,9 @@ class ScanPopup:
         self._camera_cap = cap
         self._selected_camera_index = camera_index
         self._camera_only_mode = True
+        self._camera_window_visible = True
         self._open_requested.clear()
         self.hide()
-        if self._hotkey_handle is not None:
-            keyboard.remove_hotkey(self._hotkey_handle)
-            self._hotkey_handle = None
         return True
 
     def _ensure_live_camera(self) -> bool:
@@ -168,6 +168,9 @@ class ScanPopup:
         if not ok or frame is None:
             return
 
+        if not self._camera_window_visible:
+            return
+
         text, points, _ = self._camera_detector.detectAndDecode(frame)
         cv2.imshow(self._camera_window_name, frame)
         cv2.waitKey(1)
@@ -188,6 +191,11 @@ class ScanPopup:
         if now - self._last_camera_emit_ts < COOLDOWN_S:
             return
         self._last_camera_emit_ts = now
+        self._camera_window_visible = False
+        try:
+            cv2.destroyWindow(self._camera_window_name)
+        except Exception:
+            pass
         self.on_scan(text)
 
     def _add_placeholder(self):
@@ -310,26 +318,30 @@ class ScanPopup:
         return result["action"]
 
     def _list_cameras(self) -> List[Tuple[int, str]]:
+        if cv2 is None:
+            return []
+
+        listed_cameras: List[Tuple[int, str]] = []
         if FilterGraph is not None:
             try:
                 graph = FilterGraph()
                 names = graph.get_input_devices()
-                return [(idx, str(name)) for idx, name in enumerate(names)]
+                listed_cameras = [(idx, str(name)) for idx, name in enumerate(names)]
             except Exception:
-                pass
+                listed_cameras = []
 
-        if cv2 is None:
-            return []
+        if not listed_cameras:
+            listed_cameras = [(idx, f"Kamera {idx}") for idx in range(10)]
 
-        fallback = []
-        for idx in range(10):
+        available_cameras = []
+        for idx, name in listed_cameras:
             cap = cv2.VideoCapture(idx)
             try:
                 if cap.isOpened():
-                    fallback.append((idx, f"Kamera {idx}"))
+                    available_cameras.append((idx, name))
             finally:
                 cap.release()
-        return fallback
+        return available_cameras
 
     def _select_camera_dialog(self) -> Optional[int]:
         cameras = self._list_cameras()
