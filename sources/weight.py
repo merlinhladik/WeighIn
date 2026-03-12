@@ -291,7 +291,23 @@ def _show_detection_error_dialog(cap, initial_frame, last_boxes):
     popup.geometry(f"{popup_w}x{popup_h}")
     popup.resizable(False, False)
     popup.attributes("-topmost", True)
-    popup.protocol("WM_DELETE_WINDOW", lambda: None)
+
+    def close(event=None):
+        try:
+            popup.destroy()
+        except tk.TclError:
+            pass
+
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+        state["retry_requested"] = False
+        state["cancel"] = True
+
+    popup.protocol("WM_DELETE_WINDOW", close)
+    popup.bind("<Escape>", close)
 
     popup.update_idletasks()
     x = (popup.winfo_screenwidth() - popup_w) // 2
@@ -315,6 +331,9 @@ def _show_detection_error_dialog(cap, initial_frame, last_boxes):
 
     try:
         while True:
+            if state.get("cancel"):
+                break
+            
             ok, next_frame = cap.read()
             if ok and next_frame is not None:
                 current_frame = next_frame
@@ -349,6 +368,8 @@ def _show_detection_error_dialog(cap, initial_frame, last_boxes):
 
             updated_boxes = boxes
             break
+
+
     finally:
         try:
             popup.destroy()

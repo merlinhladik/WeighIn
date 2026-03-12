@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 URL = "ws://localhost:8765"
 COOLDOWN_S = 1.0
+HOTKEY_DEBOUNCE_S = 0.35
 SCAN_HINT = "Bitte den QR scannen und hier nichts eintippen"
 QR_ERROR_TEXT = "Error: Qr kann nicht erkannt werden"
 
@@ -74,8 +75,10 @@ class ScanPopup:
         self._camera_cap = None
         self._camera_detector = cv2.QRCodeDetector() if cv2 is not None else None
         self._last_camera_emit_ts = 0.0
+        self._last_hotkey_ts = 0.0
         self._camera_window_name = "QR Kamera Live"
         self._camera_window_visible = False
+        self._open_in_progress = False
 
         self._hotkey_handle = keyboard.add_hotkey("F12", self._on_hotkey_press)
         self._esc_handle = keyboard.add_hotkey("esc", self._on_escape_press)
@@ -84,20 +87,36 @@ class ScanPopup:
         if self._camera_only_mode:
             self._camera_window_visible = True
             return
+
+        if self.win and self.win.winfo_exists():
+            return
+
         self._open_requested.set()
 
     def _on_escape_press(self):
+        if self._camera_only_mode and self._camera_window_visible:
+            self._close_camera_window()
+            return
         self._hide_requested.set()
 
+    def _close_camera_window(self):
+        self._camera_window_visible = False
+        if cv2 is None:
+            return
+        try:
+            cv2.destroyWindow(self._camera_window_name)
+        except Exception:
+            pass
+
     def process_requests(self):
-        if self._camera_only_mode:
-            self._poll_live_camera()
         if self._open_requested.is_set():
             self._open_requested.clear()
             self.open()
         if self._hide_requested.is_set():
             self._hide_requested.clear()
             self.hide()
+        if self._camera_only_mode:
+            self._poll_live_camera()
 
     # trim because qr scanner works somehow only then
     @staticmethod
@@ -132,7 +151,7 @@ class ScanPopup:
                 pass
             self._camera_cap = None
 
-        cap = cv2.VideoCapture(camera_index)
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
             logger.warning("Failed to open camera index %s", camera_index)
             cap.release()
@@ -145,6 +164,11 @@ class ScanPopup:
         self._camera_window_visible = True
         self._open_requested.clear()
         self.hide()
+        try:
+            cv2.namedWindow(self._camera_window_name, cv2.WINDOW_NORMAL)
+            cv2.waitKey(1)
+        except Exception:
+            pass
         return True
 
     def _ensure_live_camera(self) -> bool:
@@ -152,7 +176,7 @@ class ScanPopup:
             return False
         if self._camera_cap is not None and self._camera_cap.isOpened():
             return True
-        self._camera_cap = cv2.VideoCapture(self._selected_camera_index)
+        self._camera_cap = cv2.VideoCapture(self._selected_camera_index, cv2.CAP_DSHOW)
         if not self._camera_cap.isOpened():
             logger.warning("Failed to open camera index %s", self._selected_camera_index)
             self._camera_cap.release()
@@ -173,7 +197,18 @@ class ScanPopup:
 
         text, points, _ = self._camera_detector.detectAndDecode(frame)
         cv2.imshow(self._camera_window_name, frame)
-        cv2.waitKey(1)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:
+            self._close_camera_window()
+            return
+
+        try:
+            visible = cv2.getWindowProperty(self._camera_window_name, cv2.WND_PROP_VISIBLE)
+        except Exception:
+            visible = 0
+        if visible < 1:
+            self._close_camera_window()
+            return
 
         if points is None or not text:
             return
@@ -191,11 +226,7 @@ class ScanPopup:
         if now - self._last_camera_emit_ts < COOLDOWN_S:
             return
         self._last_camera_emit_ts = now
-        self._camera_window_visible = False
-        try:
-            cv2.destroyWindow(self._camera_window_name)
-        except Exception:
-            pass
+        self._close_camera_window()
         self.on_scan(text)
 
     def _add_placeholder(self):
@@ -214,29 +245,36 @@ class ScanPopup:
         self._placeholder_active = False
 
     def open(self):
+        if self._open_in_progress:
+            return
         if self.win and self.win.winfo_exists():
             self._focus()
             return
 
-        self.win = tk.Toplevel(self.root)
-        self.win.title("Scan")
-        self.win.attributes("-topmost", True)
-        self.win.geometry("800x110+300+200")
-        self.win.resizable(False, False)
+        self._open_in_progress = True
+        try:
+            self.win = tk.Toplevel(self.root)
+            self.win.title("Scan")
+            self.win.attributes("-topmost", True)
+            self.win.geometry("800x110+300+200")
+            self.win.resizable(False, False)
+            self.win.protocol("WM_DELETE_WINDOW", self.hide)
 
-        frame = tk.Frame(self.win, padx=12, pady=12)
-        frame.pack(fill="both", expand=True)
+            frame = tk.Frame(self.win, padx=12, pady=12)
+            frame.pack(fill="both", expand=True)
 
-        self.entry = tk.Entry(frame, font=("Rubik", 14))
-        self.entry.pack(fill="x", expand=True)
+            self.entry = tk.Entry(frame, font=("Rubik", 14))
+            self.entry.pack(fill="x", expand=True)
 
-        self.win.bind("<Escape>", lambda _event: self.hide())
-        self.entry.bind("<Return>", self._submit)
-        self.entry.bind("<KeyPress>", lambda _event: self._clear_placeholder())
+            self.win.bind("<Escape>", lambda _event: self.hide())
+            self.entry.bind("<Return>", self._submit)
+            self.entry.bind("<KeyPress>", lambda _event: self._clear_placeholder())
 
-        self._add_placeholder()
-        self.win.wait_visibility()
-        self._focus()
+            self._add_placeholder()
+            self.win.wait_visibility()
+            self._focus()
+        finally:
+            self._open_in_progress = False
 
     def _focus(self):
         if not (self.win and self.entry):
@@ -296,7 +334,6 @@ class ScanPopup:
         def set_action(action: str):
             result["action"] = action
             popup.destroy()
-        popup.protocol("WM_DELETE_WINDOW", lambda: set_action("rescan"))
 
         tk.Button(
             btn_row,
@@ -331,11 +368,11 @@ class ScanPopup:
                 listed_cameras = []
 
         if not listed_cameras:
-            listed_cameras = [(idx, f"Kamera {idx}") for idx in range(10)]
+            listed_cameras = [(idx, f"Kamera {idx}") for idx in range(5)]
 
         available_cameras = []
         for idx, name in listed_cameras:
-            cap = cv2.VideoCapture(idx)
+            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
             try:
                 if cap.isOpened():
                     available_cameras.append((idx, name))
@@ -411,7 +448,7 @@ class ScanPopup:
             logger.warning("OpenCV is not installed, camera QR scan unavailable.")
             return None
 
-        cap = cv2.VideoCapture(camera_index)
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
             logger.warning("Failed to open camera index %s", camera_index)
             cap.release()
@@ -479,10 +516,7 @@ class ScanPopup:
         if self._camera_cap is not None:
             self._camera_cap.release()
             self._camera_cap = None
-            try:
-                cv2.destroyWindow(self._camera_window_name)
-            except Exception:
-                pass
+            self._close_camera_window()
         if self.win and self.win.winfo_exists():
             self.win.destroy()
 
