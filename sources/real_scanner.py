@@ -70,6 +70,7 @@ class ScanPopup:
         self._placeholder_active = False
         self._open_requested = threading.Event()
         self._hide_requested = threading.Event()
+        self._scan_popup_visible = False
         self._selected_camera_index: Optional[int] = None
         self._camera_only_mode = False
         self._camera_cap = None
@@ -84,11 +85,16 @@ class ScanPopup:
         self._esc_handle = keyboard.add_hotkey("esc", self._on_escape_press)
 
     def _on_hotkey_press(self):
+        now = time.monotonic()
+        if now - self._last_hotkey_ts < HOTKEY_DEBOUNCE_S:
+            return
+        self._last_hotkey_ts = now
+
         if self._camera_only_mode:
             self._camera_window_visible = True
             return
 
-        if self.win and self.win.winfo_exists():
+        if self._scan_popup_visible or self._open_requested.is_set() or self._open_in_progress:
             return
 
         self._open_requested.set()
@@ -248,12 +254,14 @@ class ScanPopup:
         if self._open_in_progress:
             return
         if self.win and self.win.winfo_exists():
+            self._scan_popup_visible = True
             self._focus()
             return
 
         self._open_in_progress = True
         try:
             self.win = tk.Toplevel(self.root)
+            self._scan_popup_visible = True
             self.win.title("Scan")
             self.win.attributes("-topmost", True)
             self.win.geometry("800x110+300+200")
@@ -267,6 +275,7 @@ class ScanPopup:
             self.entry.pack(fill="x", expand=True)
 
             self.win.bind("<Escape>", lambda _event: self.hide())
+            self.entry.bind("<Escape>", lambda _event: self.hide())
             self.entry.bind("<Return>", self._submit)
             self.entry.bind("<KeyPress>", lambda _event: self._clear_placeholder())
 
@@ -279,6 +288,7 @@ class ScanPopup:
     def _focus(self):
         if not (self.win and self.entry):
             return
+        self._scan_popup_visible = True
         self.win.deiconify()
         self.win.lift()
 
@@ -287,6 +297,7 @@ class ScanPopup:
         self._add_placeholder()
 
     def hide(self):
+        self._scan_popup_visible = False
         if self.win and self.win.winfo_exists():
             self.win.withdraw()
 
@@ -518,6 +529,7 @@ class ScanPopup:
             self._camera_cap = None
             self._close_camera_window()
         if self.win and self.win.winfo_exists():
+            self._scan_popup_visible = False
             self.win.destroy()
 
 
