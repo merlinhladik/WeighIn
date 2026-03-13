@@ -6,3 +6,4 @@ sources/venv/
 .vscode
 dist
 build
+.vscode/
