@@ -67,6 +67,7 @@ class ScanPopup:
         self.on_scan = on_scan
         self.win = None
         self.entry = None
+        self._state_lock = threading.Lock()
         self._placeholder_active = False
         self._open_requested = threading.Event()
         self._hide_requested = threading.Event()
@@ -94,10 +95,10 @@ class ScanPopup:
             self._camera_window_visible = True
             return
 
-        if self._scan_popup_visible or self._open_requested.is_set() or self._open_in_progress:
-            return
-
-        self._open_requested.set()
+        with self._state_lock:
+            if self._scan_popup_visible or self._open_requested.is_set() or self._open_in_progress:
+                return
+            self._open_requested.set()
 
     def _on_escape_press(self):
         if self._camera_only_mode and self._camera_window_visible:
@@ -111,12 +112,18 @@ class ScanPopup:
             return
         try:
             cv2.destroyWindow(self._camera_window_name)
+            cv2.waitKey(1)
         except Exception:
             pass
 
     def process_requests(self):
-        if self._open_requested.is_set():
-            self._open_requested.clear()
+        should_open = False
+        with self._state_lock:
+            if self._open_requested.is_set() and not self._open_in_progress:
+                self._open_requested.clear()
+                self._open_in_progress = True
+                should_open = True
+        if should_open:
             self.open()
         if self._hide_requested.is_set():
             self._hide_requested.clear()
@@ -157,7 +164,7 @@ class ScanPopup:
                 pass
             self._camera_cap = None
 
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
             logger.warning("Failed to open camera index %s", camera_index)
             cap.release()
@@ -182,7 +189,7 @@ class ScanPopup:
             return False
         if self._camera_cap is not None and self._camera_cap.isOpened():
             return True
-        self._camera_cap = cv2.VideoCapture(self._selected_camera_index, cv2.CAP_DSHOW)
+        self._camera_cap = cv2.VideoCapture(self._selected_camera_index)
         if not self._camera_cap.isOpened():
             logger.warning("Failed to open camera index %s", self._selected_camera_index)
             self._camera_cap.release()
@@ -212,7 +219,7 @@ class ScanPopup:
             visible = cv2.getWindowProperty(self._camera_window_name, cv2.WND_PROP_VISIBLE)
         except Exception:
             visible = 0
-        if visible < 1:
+        if visible <= 0:
             self._close_camera_window()
             return
 
@@ -251,17 +258,21 @@ class ScanPopup:
         self._placeholder_active = False
 
     def open(self):
-        if self._open_in_progress:
-            return
-        if self.win and self.win.winfo_exists():
-            self._scan_popup_visible = True
+        with self._state_lock:
+            if self.win and self.win.winfo_exists():
+                self._scan_popup_visible = True
+                needs_focus = True
+            else:
+                if not self._open_in_progress:
+                    self._open_in_progress = True
+                self._scan_popup_visible = True
+                needs_focus = False
+        if needs_focus:
             self._focus()
             return
 
-        self._open_in_progress = True
         try:
             self.win = tk.Toplevel(self.root)
-            self._scan_popup_visible = True
             self.win.title("Scan")
             self.win.attributes("-topmost", True)
             self.win.geometry("800x110+300+200")
@@ -283,7 +294,8 @@ class ScanPopup:
             self.win.wait_visibility()
             self._focus()
         finally:
-            self._open_in_progress = False
+            with self._state_lock:
+                self._open_in_progress = False
 
     def _focus(self):
         if not (self.win and self.entry):
@@ -297,7 +309,8 @@ class ScanPopup:
         self._add_placeholder()
 
     def hide(self):
-        self._scan_popup_visible = False
+        with self._state_lock:
+            self._scan_popup_visible = False
         if self.win and self.win.winfo_exists():
             self.win.withdraw()
 
@@ -379,11 +392,11 @@ class ScanPopup:
                 listed_cameras = []
 
         if not listed_cameras:
-            listed_cameras = [(idx, f"Kamera {idx}") for idx in range(5)]
+            listed_cameras = [(idx, f"Kamera {idx}") for idx in range(10)]
 
         available_cameras = []
         for idx, name in listed_cameras:
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            cap = cv2.VideoCapture(idx)
             try:
                 if cap.isOpened():
                     available_cameras.append((idx, name))
@@ -459,7 +472,7 @@ class ScanPopup:
             logger.warning("OpenCV is not installed, camera QR scan unavailable.")
             return None
 
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
             logger.warning("Failed to open camera index %s", camera_index)
             cap.release()
@@ -566,7 +579,7 @@ async def main():
             except asyncio.QueueEmpty:
                 pass
 
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.03)
     except tk.TclError:
         return
     finally:
