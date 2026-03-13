@@ -4,7 +4,14 @@
 import cv2
 import numpy as np
 import logging
+import tkinter as tk
+import asyncio
 from wsclient import WebSocketClient, WeightClient
+
+try:
+    from pygrabber.dshow_graph import FilterGraph
+except Exception:
+    FilterGraph = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,6 +20,85 @@ URL = "ws://localhost:8765"
 
 DECODE_W, DECODE_H = 80, 140
 MIN_DIGITS, MAX_DIGITS = 3, 5
+
+
+def list_available_cameras():
+    if FilterGraph is not None:
+        try:
+            graph = FilterGraph()
+            names = graph.get_input_devices()
+            return [(idx, str(name)) for idx, name in enumerate(names)]
+        except Exception as e:
+            logger.warning("Pygrabber camera list failed: %s", e)
+
+    cameras = []
+    for idx in range(10):
+        cap = cv2.VideoCapture(idx)
+        try:
+            if cap.isOpened():
+                cameras.append((idx, f"Kamera {idx}"))
+        finally:
+            cap.release()
+    return cameras
+
+
+def select_camera_index() -> int:
+    cameras = list_available_cameras()
+    if not cameras:
+        raise RuntimeError("No Camera found")
+
+    root = tk.Tk()
+    root.withdraw()
+
+    popup_w = 360
+    popup_h = 300
+    result = {"index": None}
+
+    popup = tk.Toplevel()
+    popup.title("Kamera auswählen")
+    popup.geometry(f"{popup_w}x{popup_h}")
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.protocol("WM_DELETE_WINDOW", popup.destroy)
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup_w) // 2
+    y = (popup.winfo_screenheight() - popup_h) // 2
+    popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
+
+    frame = tk.Frame(popup, padx=12, pady=12)
+    frame.pack(fill="both", expand=True)
+    tk.Label(frame, text="Verfügbare Kameras:").pack(anchor="w", pady=(0, 8))
+
+    listbox = tk.Listbox(frame, height=10)
+    for cam_idx, cam_name in cameras:
+        listbox.insert(tk.END, f"[{cam_idx}] {cam_name}")
+    listbox.pack(fill="both", expand=True)
+    listbox.selection_set(0)
+
+    def choose():
+        sel = listbox.curselection()
+        if not sel:
+            return
+        result["index"] = cameras[sel[0]][0]
+        popup.destroy()
+
+    btn_row = tk.Frame(frame)
+    btn_row.pack(pady=(10, 0))
+    tk.Button(btn_row, text="Öffnen", width=14, command=choose).pack(side=tk.LEFT, padx=6)
+    tk.Button(btn_row, text="Abbrechen", width=14, command=popup.destroy).pack(side=tk.LEFT, padx=6)
+
+    popup.focus_force()
+    popup.wait_window()
+
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+    if result["index"] is None:
+        raise RuntimeError("Kameraauswahl abgebrochen.")
+    return result["index"]
 
 def red_mask(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -143,23 +229,11 @@ def decode_from_fixed_boxes(mask, boxes):
     return "".join(str(d) for d in digits)
 
 
-
-def _decode_current_weight(frame, last_boxes):
-    mask = red_mask(frame)
-
-    boxes = auto_digit_boxes_from_mask(mask)
-    if boxes is None:
-        boxes = last_boxes
-        if boxes is None:
-            logger.error("Auto Detection failed, no boxes found")
-            return None, last_boxes
-    else:
-        last_boxes = boxes
-
-    text= decode_from_fixed_boxes(mask, boxes)
-
-    # Debug: show mask + boxes + segment regions
+def _build_debug_image(mask, boxes):
     dbg = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+    if not boxes:
+        return dbg
 
     for (bx, by, bw, bh) in boxes:
         cv2.rectangle(dbg, (bx, by), (bx + bw, by + bh), (0, 255, 0), 1)
@@ -182,9 +256,139 @@ def _decode_current_weight(frame, last_boxes):
         for (x1, y1, x2, y2) in regions:
             cv2.rectangle(dbg, (bx + x1, by + y1), (bx + x2, by + y2), (255, 0, 0), 1)
 
-    cv2.imshow("debug", dbg)
+    return dbg
+
+
+def _decode_current_weight(frame, last_boxes):
+    mask = red_mask(frame)
+
+    boxes = auto_digit_boxes_from_mask(mask)
+    if boxes is None:
+        boxes = last_boxes
+        if boxes is None:
+            logger.error("Auto Detection failed, no boxes found")
+            return None, last_boxes
+    else:
+        last_boxes = boxes
+
+    text = decode_from_fixed_boxes(mask, boxes)
 
     return text, last_boxes
+
+
+def _show_detection_error_dialog(cap, initial_frame, last_boxes):
+    root = tk.Tk()
+    root.withdraw()
+
+    popup_w = 460
+    popup_h = 180
+    state = {"retry_requested": False}
+    current_frame = initial_frame
+    updated_boxes = last_boxes
+
+    popup = tk.Toplevel(root)
+    popup.title("Fehler")
+    popup.geometry(f"{popup_w}x{popup_h}")
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+
+    def close(event=None):
+        try:
+            popup.destroy()
+        except tk.TclError:
+            pass
+
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+        state["retry_requested"] = False
+        state["cancel"] = True
+
+    popup.protocol("WM_DELETE_WINDOW", close)
+    popup.bind("<Escape>", close)
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup_w) // 2
+    y = 40
+    popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
+
+    frame = tk.Frame(popup, padx=16, pady=16)
+    frame.pack(fill="both", expand=True)
+
+    tk.Label(
+        frame,
+        text="Fehler: Bitte Kamera anpassen",
+        font=("Arial", 16, "bold"),
+        justify="center",
+    ).pack(pady=(8, 16))
+
+    def request_retry():
+        state["retry_requested"] = True
+
+    tk.Button(frame, text="OK", width=12, command=request_retry).pack()
+
+    try:
+        while True:
+            if state.get("cancel"):
+                break
+            
+            ok, next_frame = cap.read()
+            if ok and next_frame is not None:
+                current_frame = next_frame
+
+            mask = red_mask(current_frame)
+            boxes = auto_digit_boxes_from_mask(mask)
+            dbg = _build_debug_image(mask, boxes)
+
+            cv2.imshow("live", current_frame)
+            cv2.imshow("debug", dbg)
+
+            cv2.moveWindow("live", 50, 250)
+            cv2.moveWindow("debug", 700, 250)
+            
+            cv2.waitKey(1)
+
+            root.update_idletasks()
+            root.update()
+
+            if not state["retry_requested"]:
+                continue
+
+            state["retry_requested"] = False
+            if boxes is None:
+                logger.error("Auto Detection failed, no boxes found")
+                continue
+
+            text = decode_from_fixed_boxes(mask, boxes)
+            if text is None:
+                logger.error("Digit decode failed during manual retry")
+                continue
+
+            updated_boxes = boxes
+            break
+
+
+    finally:
+        try:
+            popup.destroy()
+        except tk.TclError:
+            pass
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+        try:
+            cv2.destroyWindow("live")
+        except cv2.error:
+            pass
+        try:
+            cv2.destroyWindow("debug")
+        except cv2.error:
+            pass
+
+    return updated_boxes
 
 
 async def main(cam_index: int = 0):
@@ -205,6 +409,7 @@ async def main(cam_index: int = 0):
 
         text, last_boxes = _decode_current_weight(frame, last_boxes)
         if text is None:
+            last_boxes = _show_detection_error_dialog(cap, frame, last_boxes)
             return None
         
         return text
@@ -216,9 +421,6 @@ async def main(cam_index: int = 0):
             ok, frame = cap.read()
             if not ok or frame is None:
                 return None
-
-            cv2.imshow("live", frame)
-            cv2.waitKey(1)
 
             try:
                 msg = await asyncio.wait_for(ws.recv_json(), timeout=0.01)
@@ -233,5 +435,5 @@ async def main(cam_index: int = 0):
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    selected_camera = select_camera_index()
+    asyncio.run(main(selected_camera))
