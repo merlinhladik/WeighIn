@@ -84,6 +84,8 @@ class WeighingApp(tk.Tk):
         self.ws_server = None
         self.ws_clients = set()
         self.qr_ws_clients = set()
+        self.weight_ws_clients = set()
+        self.scanner_ws_clients = set()
         self.external_program_threads: List[threading.Thread] = []
         self.external_programs_started = False
          
@@ -1463,30 +1465,29 @@ class WeighingApp(tk.Tk):
         popup.geometry(f"{popup_w}x{popup_h}+{max(x_pos, 0)}+{max(y_pos, 0)}")
 
         lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Rubik", 11)}
-        dropdown_style = {
-            "bg": THEME["input_bg"],
-            "fg": THEME["fg"],
-            "activebackground": THEME["accent"],
-            "activeforeground": "black",
-            "highlightthickness": 0,
-            "bd": 0,
-            "font": ("Rubik", 11, "bold"),
-            "width": 10,
-        }
 
         tk.Label(popup, text="Nachkommastellen für Waage", **lbl_style).pack(pady=(22, 8))
 
         decimal_var = tk.StringVar(value=str(self.weight_decimal_places))
-        decimal_dropdown = tk.OptionMenu(popup, decimal_var, "0", "1", "2", "3")
-        decimal_dropdown.config(**dropdown_style)
-        decimal_dropdown["menu"].config(
+        decimal_entry = tk.Entry(
+            popup,
+            textvariable=decimal_var,
             bg=THEME["input_bg"],
             fg=THEME["fg"],
-            activebackground=THEME["accent"],
-            activeforeground="black",
-            font=("Rubik", 10),
+            insertbackground=THEME["fg"],
+            font=("Rubik", 11, "bold"),
+            justify="center",
+            width=12,
         )
-        decimal_dropdown.pack()
+        decimal_entry.pack()
+
+        def validate_decimal_input(proposed: str) -> bool:
+            return proposed == "" or proposed.isdigit()
+
+        decimal_entry.config(
+            validate="key",
+            validatecommand=(popup.register(validate_decimal_input), "%P"),
+        )
 
         note = (
             "Beispiel: Eingang 7564 bei 2 Nachkommastellen\n"
@@ -1536,7 +1537,17 @@ class WeighingApp(tk.Tk):
             fg="#f0f0f2",
             font=("Rubik", 10, "bold"),
             width=20,
-        ).pack(pady=(8, 4))
+        ).pack(pady=(8, 20))
+
+        tk.Button(
+            popup,
+            text="Kamera auswählen",
+            command=self.open_camera_target_dialog,
+            bg=THEME["input_bg"],
+            fg="#f0f0f2",
+            font=("Rubik", 10, "bold"),
+            width=20,
+        ).pack(pady=(4, 12))
 
         def _on_settings_close():
             if popup == self.settings_popup:
@@ -1544,13 +1555,35 @@ class WeighingApp(tk.Tk):
             popup.destroy()
 
         def save_and_close():
-            try:
-                selected_places = int(decimal_var.get())
-            except ValueError:
-                selected_places = 1
+            decimal_text = decimal_var.get().strip()
+            if not decimal_text:
+                messagebox.showerror(
+                    "Einstellungen",
+                    "Nachkommastellen muss eine ganze Zahl größer oder gleich 0 sein.",
+                    parent=popup,
+                )
+                decimal_entry.focus_set()
+                return
 
-            if selected_places not in [0, 1, 2, 3]:
-                selected_places = 1
+            try:
+                selected_places = int(decimal_text)
+            except ValueError:
+                messagebox.showerror(
+                    "Einstellungen",
+                    "Nachkommastellen muss eine ganze Zahl größer oder gleich 0 sein.",
+                    parent=popup,
+                )
+                decimal_entry.focus_set()
+                return
+
+            if selected_places < 0:
+                messagebox.showerror(
+                    "Einstellungen",
+                    "Nachkommastellen muss eine ganze Zahl größer oder gleich 0 sein.",
+                    parent=popup,
+                )
+                decimal_entry.focus_set()
+                return
 
             self.weight_decimal_places = selected_places
 
@@ -1582,6 +1615,118 @@ class WeighingApp(tk.Tk):
             width=12,
         ).pack(side=tk.LEFT, padx=8)
         popup.protocol("WM_DELETE_WINDOW", _on_settings_close)
+
+    def request_camera_selection(self, target_role: str):
+        """Asks a connected client to open its camera selection dialog."""
+        if not self.ws_loop:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._send_camera_selection_request(target_role),
+            self.ws_loop,
+        )
+
+    def open_camera_target_dialog(self):
+        """Opens a small dialog to choose the target device."""
+        parent = self.settings_popup if self.settings_popup and self.settings_popup.winfo_exists() else self
+        popup_w = 260
+        popup_h = 150
+        popup = tk.Toplevel(parent)
+        popup.title("Kamera auswählen")
+        popup.geometry(f"{popup_w}x{popup_h}")
+        popup.configure(bg=THEME["bg"])
+        popup.resizable(False, False)
+        if hasattr(popup, "transient"):
+            popup.transient(parent)
+        popup.grab_set()
+
+        popup.update_idletasks()
+        try:
+            parent.update_idletasks()
+            root_x = parent.winfo_rootx()
+            root_y = parent.winfo_rooty()
+            root_w = parent.winfo_width()
+            root_h = parent.winfo_height()
+            x_pos = root_x + (root_w - popup_w) // 2
+            y_pos = root_y + (root_h - popup_h) // 2
+        except Exception:
+            screen_w = popup.winfo_screenwidth()
+            screen_h = popup.winfo_screenheight()
+            x_pos = (screen_w - popup_w) // 2
+            y_pos = (screen_h - popup_h) // 2
+        popup.geometry(f"{popup_w}x{popup_h}+{max(x_pos, 0)}+{max(y_pos, 0)}")
+
+        tk.Label(
+            popup,
+            text="Für welches Gerät?",
+            bg=THEME["bg"],
+            fg=THEME["fg"],
+            font=("Rubik", 11),
+        ).pack(pady=(18, 14))
+
+        button_frame = tk.Frame(popup, bg=THEME["bg"])
+        button_frame.pack()
+
+        def choose_target(target_role: str):
+            popup.destroy()
+            self.request_camera_selection(target_role)
+
+        tk.Button(
+            button_frame,
+            text="Waage",
+            command=lambda: choose_target("weight"),
+            bg=THEME["input_bg"],
+            fg="#f0f0f2",
+            font=("Rubik", 10, "bold"),
+            width=10,
+        ).pack(side=tk.LEFT, padx=6)
+
+        tk.Button(
+            button_frame,
+            text="Scanner",
+            command=lambda: choose_target("scanner"),
+            bg=THEME["input_bg"],
+            fg="#f0f0f2",
+            font=("Rubik", 10, "bold"),
+            width=10,
+        ).pack(side=tk.LEFT, padx=6)
+
+        popup.protocol("WM_DELETE_WINDOW", popup.destroy)
+
+    async def _send_camera_selection_request(self, target_role: str):
+        """Sends OPEN_CAMERA_SELECTION to the requested client type."""
+        if target_role == "weight":
+            candidate_clients = list(self.weight_ws_clients)
+            target_label = "Waage"
+        elif target_role == "scanner":
+            candidate_clients = list(self.scanner_ws_clients)
+            target_label = "QR Scanner"
+        else:
+            return
+
+        if not candidate_clients:
+            self.after(
+                0,
+                lambda: messagebox.showwarning(
+                    "Kamera",
+                    f"Kein verbundener Client für {target_label} gefunden.",
+                    parent=self.settings_popup if self.settings_popup and self.settings_popup.winfo_exists() else self,
+                ),
+            )
+            return
+
+        msg = json.dumps({"type": "OPEN_CAMERA_SELECTION"}, ensure_ascii=False)
+        stale = []
+        for client in candidate_clients:
+            try:
+                await client.send(msg)
+            except Exception:
+                stale.append(client)
+
+        for client in stale:
+            self.weight_ws_clients.discard(client)
+            self.scanner_ws_clients.discard(client)
+            self.qr_ws_clients.discard(client)
+            self.ws_clients.discard(client)
 
     def start_websocket_server(self):
         """Starts the GUI WebSocket server on ws://localhost:8765."""
@@ -1641,6 +1786,31 @@ class WeighingApp(tk.Tk):
                     continue
 
                 msg_type = payload.get("type")
+                if msg_type == "register":
+                    role = str(payload.get("role") or "").strip().lower()
+                    self.weight_ws_clients.discard(websocket)
+                    self.scanner_ws_clients.discard(websocket)
+                    self.qr_ws_clients.discard(websocket)
+                    if role == "weight":
+                        self.weight_ws_clients.add(websocket)
+                    elif role == "scanner":
+                        self.scanner_ws_clients.add(websocket)
+                        self.qr_ws_clients.add(websocket)
+                    else:
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": "error",
+                                    "message": "unsupported register role",
+                                }
+                            )
+                        )
+                        continue
+                    await websocket.send(
+                        json.dumps({"type": "ack", "message": f"registered as {role}"})
+                    )
+                    continue
+
                 if msg_type == "qr":
                     self.qr_ws_clients.add(websocket)
                     msg_info = payload.get("info")
@@ -1689,6 +1859,8 @@ class WeighingApp(tk.Tk):
         except Exception as e:
             print(f"[WebSocket] Client error: {e}")
         finally:
+            self.weight_ws_clients.discard(websocket)
+            self.scanner_ws_clients.discard(websocket)
             self.qr_ws_clients.discard(websocket)
             self.ws_clients.discard(websocket)
 

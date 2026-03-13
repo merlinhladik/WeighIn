@@ -8,9 +8,10 @@ import asyncio
 import time
 import tkinter as tk
 from typing import Optional, List, Tuple
-from wsclient import WebSocketClient, QRClient
+from wsclient import WebSocketClient, QRClient, WebSocketDisconnected
 import keyboard
 import logging
+import websockets
 
 try:
     import cv2
@@ -30,6 +31,7 @@ COOLDOWN_S = 1.0
 HOTKEY_DEBOUNCE_S = 0.35
 SCAN_HINT = "Bitte den QR scannen und hier nichts eintippen"
 QR_ERROR_TEXT = "Error: Qr kann nicht erkannt werden"
+RECONNECT_DELAY_S = 2.0
 
 
 def base64url_decode(data: str) -> bytes:
@@ -426,7 +428,7 @@ class ScanPopup:
         result = {"index": None}
 
         popup = tk.Toplevel()
-        popup.title("Kamera auswählen")
+        popup.title("Kamera für QR scanner auswählen")
         popup.geometry(f"{popup_w}x{popup_h}")
         popup.resizable(False, False)
         popup.attributes("-topmost", True)
@@ -548,12 +550,20 @@ class ScanPopup:
 
 async def main():
     ws = WebSocketClient(URL)
-    await ws.connect()
     qr_client = QRClient(ws)
-    logger.info("WS connected: %s", URL)
     root = tk.Tk()
     root.withdraw()
     send_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def connect_with_retry():
+        while True:
+            try:
+                await ws.connect()
+                logger.info("WS connected: %s", URL)
+                return
+            except (OSError, websockets.WebSocketException) as exc:
+                logger.warning("WS connect failed, retry in %.1fs: %s", RECONNECT_DELAY_S, exc)
+                await asyncio.sleep(RECONNECT_DELAY_S)
 
     def on_scan(scanned: str):
         try:
@@ -566,6 +576,8 @@ async def main():
     popup = ScanPopup(root, on_scan)
 
     try:
+        await connect_with_retry()
+        await qr_client.register()
         while True:
             popup.process_requests()
             root.update_idletasks()
@@ -574,10 +586,33 @@ async def main():
             try:
                 while True:
                     info = send_queue.get_nowait()
-                    await qr_client.send_qr(info)
-                    logger.info("Sent QR")
+                    while True:
+                        try:
+                            await qr_client.send_qr(info)
+                            logger.info("Sent QR")
+                            break
+                        except WebSocketDisconnected as exc:
+                            logger.warning("WS send failed, reconnecting: %s", exc)
+                            await connect_with_retry()
+                            await qr_client.register()
             except asyncio.QueueEmpty:
                 pass
+
+            try:
+                msg = await asyncio.wait_for(ws.recv_json(), timeout=0.01)
+            except asyncio.TimeoutError:
+                msg = None
+            except WebSocketDisconnected as exc:
+                logger.warning("WS recv failed, reconnecting: %s", exc)
+                await connect_with_retry()
+                await qr_client.register()
+                msg = None
+
+            if msg and msg.get("type") == "OPEN_CAMERA_SELECTION":
+                camera_index = popup._select_camera_dialog()
+                if camera_index is not None:
+                    popup._selected_camera_index = camera_index
+                    popup._enable_camera_only_mode(camera_index)
 
             await asyncio.sleep(0.03)
     except tk.TclError:

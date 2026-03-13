@@ -6,7 +6,8 @@ import numpy as np
 import logging
 import tkinter as tk
 import asyncio
-from wsclient import WebSocketClient, WeightClient
+import websockets
+from wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
 
 try:
     from pygrabber.dshow_graph import FilterGraph
@@ -17,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 URL = "ws://localhost:8765"
+RECONNECT_DELAY_S = 2.0
 
 DECODE_W, DECODE_H = 80, 140
 MIN_DIGITS, MAX_DIGITS = 3, 5
@@ -55,7 +57,7 @@ def select_camera_index() -> int:
     result = {"index": None}
 
     popup = tk.Toplevel()
-    popup.title("Kamera auswählen")
+    popup.title("Kamera Für die Waage auswählen")
     popup.geometry(f"{popup_w}x{popup_h}")
     popup.resizable(False, False)
     popup.attributes("-topmost", True)
@@ -392,17 +394,30 @@ def _show_detection_error_dialog(cap, initial_frame, last_boxes):
 
 
 async def main(cam_index: int = 0):
-    cap = cv2.VideoCapture(cam_index)
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-    cap.set(cv2.CAP_PROP_EXPOSURE, -10)
-    if not cap.isOpened():
-        raise RuntimeError("Webcam cannot be opened.")
+    def open_camera(camera_index: int):
+        opened_cap = cv2.VideoCapture(camera_index)
+        opened_cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        opened_cap.set(cv2.CAP_PROP_EXPOSURE, -10)
+        if not opened_cap.isOpened():
+            opened_cap.release()
+            raise RuntimeError("Webcam cannot be opened.")
+        return opened_cap
+
+    cap = open_camera(cam_index)
 
     last_boxes = None
 
     ws = WebSocketClient(URL)
-    await ws.connect()
-    logger.info("WS connected: %s", URL)
+
+    async def connect_with_retry():
+        while True:
+            try:
+                await ws.connect()
+                logger.info("WS connected: %s", URL)
+                return
+            except (OSError, websockets.WebSocketException) as exc:
+                logger.warning("WS connect failed, retry in %.1fs: %s", RECONNECT_DELAY_S, exc)
+                await asyncio.sleep(RECONNECT_DELAY_S)
 
     def weight_provider():
         nonlocal last_boxes
@@ -417,6 +432,8 @@ async def main(cam_index: int = 0):
     weight_client = WeightClient(ws, weight_provider)
 
     try:
+        await connect_with_retry()
+        await weight_client.register()
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -426,8 +443,36 @@ async def main(cam_index: int = 0):
                 msg = await asyncio.wait_for(ws.recv_json(), timeout=0.01)
             except asyncio.TimeoutError:
                 continue
+            except WebSocketDisconnected as exc:
+                logger.warning("WS recv failed, reconnecting: %s", exc)
+                await connect_with_retry()
+                await weight_client.register()
+                continue
 
-            await weight_client.handle_message(msg)
+            if msg.get("type") == "OPEN_CAMERA_SELECTION":
+                try:
+                    selected_camera = select_camera_index()
+                except RuntimeError:
+                    continue
+
+                try:
+                    new_cap = open_camera(selected_camera)
+                except RuntimeError as exc:
+                    logger.warning("Opening selected camera failed: %s", exc)
+                    continue
+
+                cap.release()
+                cap = new_cap
+                cam_index = selected_camera
+                last_boxes = None
+                continue
+
+            try:
+                await weight_client.handle_message(msg)
+            except WebSocketDisconnected as exc:
+                logger.warning("WS send failed, reconnecting: %s", exc)
+                await connect_with_retry()
+                await weight_client.register()
 
     finally:
         await ws.close()
