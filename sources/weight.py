@@ -8,11 +8,7 @@ import tkinter as tk
 import asyncio
 import websockets
 from wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
-
-try:
-    from pygrabber.dshow_graph import FilterGraph
-except Exception:
-    FilterGraph = None
+from list_available_cameras import list_available_cameras
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,26 +18,6 @@ RECONNECT_DELAY_S = 2.0
 
 DECODE_W, DECODE_H = 80, 140
 MIN_DIGITS, MAX_DIGITS = 3, 5
-
-
-def list_available_cameras():
-    if FilterGraph is not None:
-        try:
-            graph = FilterGraph()
-            names = graph.get_input_devices()
-            return [(idx, str(name)) for idx, name in enumerate(names)]
-        except Exception as e:
-            logger.warning("Pygrabber camera list failed: %s", e)
-
-    cameras = []
-    for idx in range(10):
-        cap = cv2.VideoCapture(idx)
-        try:
-            if cap.isOpened():
-                cameras.append((idx, f"Kamera {idx}"))
-        finally:
-            cap.release()
-    return cameras
 
 
 def select_camera_index() -> int:

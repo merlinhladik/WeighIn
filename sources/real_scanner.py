@@ -7,21 +7,17 @@ import json
 import asyncio
 import time
 import tkinter as tk
-from typing import Optional, List, Tuple
+from typing import Optional
 from wsclient import WebSocketClient, QRClient, WebSocketDisconnected
 import keyboard
 import logging
 import websockets
+from list_available_cameras import list_available_cameras
 
 try:
     import cv2
 except Exception:
     cv2 = None
-
-try:
-    from pygrabber.dshow_graph import FilterGraph
-except Exception:
-    FilterGraph = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -380,34 +376,8 @@ class ScanPopup:
         popup.wait_window()
         return result["action"]
 
-    def _list_cameras(self) -> List[Tuple[int, str]]:
-        if cv2 is None:
-            return []
-
-        listed_cameras: List[Tuple[int, str]] = []
-        if FilterGraph is not None:
-            try:
-                graph = FilterGraph()
-                names = graph.get_input_devices()
-                listed_cameras = [(idx, str(name)) for idx, name in enumerate(names)]
-            except Exception:
-                listed_cameras = []
-
-        if not listed_cameras:
-            listed_cameras = [(idx, f"Kamera {idx}") for idx in range(10)]
-
-        available_cameras = []
-        for idx, name in listed_cameras:
-            cap = cv2.VideoCapture(idx)
-            try:
-                if cap.isOpened():
-                    available_cameras.append((idx, name))
-            finally:
-                cap.release()
-        return available_cameras
-
     def _select_camera_dialog(self) -> Optional[int]:
-        cameras = self._list_cameras()
+        cameras = [] if cv2 is None else list_available_cameras()
         if not cameras:
             logger.warning("No camera devices found.")
             notice = tk.Toplevel()

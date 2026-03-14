@@ -3,6 +3,12 @@ opencv-python
 numpy
 pandas
 keyboard
-pygrabber
 
+# For camera access
+pygrabber (windows)
+v4l-utils (linux)
+system_profiler (macOS)
+
+
+# For packaging the application
 pyinstaller
