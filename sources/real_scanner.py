@@ -7,7 +7,7 @@ import json
 import asyncio
 import time
 import tkinter as tk
-from typing import Optional
+from typing import Optional, Tuple
 from wsclient import WebSocketClient, QRClient, WebSocketDisconnected
 import keyboard
 import logging
@@ -28,6 +28,10 @@ HOTKEY_DEBOUNCE_S = 0.35
 SCAN_HINT = "Bitte den QR scannen und hier nichts eintippen"
 QR_ERROR_TEXT = "Error: Qr kann nicht erkannt werden"
 RECONNECT_DELAY_S = 2.0
+MODE_IDLE = "idle"
+MODE_POPUP = "popup"
+MODE_CAMERA_SELECTION = "camera_selection"
+MODE_CAMERA = "camera"
 
 
 def base64url_decode(data: str) -> bytes:
@@ -67,21 +71,31 @@ class ScanPopup:
         self.entry = None
         self._state_lock = threading.Lock()
         self._placeholder_active = False
-        self._open_requested = threading.Event()
-        self._hide_requested = threading.Event()
-        self._scan_popup_visible = False
+        self._mode = MODE_IDLE
         self._selected_camera_index: Optional[int] = None
-        self._camera_only_mode = False
         self._camera_cap = None
         self._camera_detector = cv2.QRCodeDetector() if cv2 is not None else None
         self._last_camera_emit_ts = 0.0
         self._last_hotkey_ts = 0.0
         self._camera_window_name = "QR Kamera Live"
-        self._camera_window_visible = False
-        self._open_in_progress = False
 
         self._hotkey_handle = keyboard.add_hotkey("F12", self._on_hotkey_press)
         self._esc_handle = keyboard.add_hotkey("esc", self._on_escape_press)
+
+    def _get_mode(self) -> str:
+        with self._state_lock:
+            return self._mode
+
+    def _set_mode(self, mode: str):
+        with self._state_lock:
+            self._mode = mode
+
+    def _transition_mode(self, allowed_from: Tuple[str, ...], target: str) -> bool:
+        with self._state_lock:
+            if self._mode not in allowed_from:
+                return False
+            self._mode = target
+            return True
 
     def _on_hotkey_press(self):
         now = time.monotonic()
@@ -89,45 +103,49 @@ class ScanPopup:
             return
         self._last_hotkey_ts = now
 
-        if self._camera_only_mode:
-            self._camera_window_visible = True
-            return
-
-        with self._state_lock:
-            if self._scan_popup_visible or self._open_requested.is_set() or self._open_in_progress:
-                return
-            self._open_requested.set()
+        self._transition_mode((MODE_IDLE,), MODE_POPUP)
 
     def _on_escape_press(self):
-        if self._camera_only_mode and self._camera_window_visible:
-            self._close_camera_window()
-            return
-        self._hide_requested.set()
+        mode = self._get_mode()
+        if mode in (MODE_POPUP, MODE_CAMERA):
+            self._set_mode(MODE_IDLE)
+
+    def _popup_is_visible(self) -> bool:
+        if not (self.win and self.win.winfo_exists()):
+            return False
+        return self.win.state() != "withdrawn"
 
     def _close_camera_window(self):
-        self._camera_window_visible = False
         if cv2 is None:
             return
         try:
             cv2.destroyWindow(self._camera_window_name)
             cv2.waitKey(1)
         except Exception:
-            pass
+            try:
+                cv2.destroyAllWindows()
+                cv2.waitKey(1)
+            except Exception:
+                pass
 
     def process_requests(self):
-        should_open = False
-        with self._state_lock:
-            if self._open_requested.is_set() and not self._open_in_progress:
-                self._open_requested.clear()
-                self._open_in_progress = True
-                should_open = True
-        if should_open:
-            self.open()
-        if self._hide_requested.is_set():
-            self._hide_requested.clear()
-            self.hide()
-        if self._camera_only_mode:
+        mode = self._get_mode()
+
+        if mode == MODE_POPUP:
+            if not self._popup_is_visible():
+                self.open()
+        else:
+            self.hide(change_mode=False)
+
+        if mode == MODE_CAMERA_SELECTION:
+            self._run_camera_selection(return_to_popup=False)
+            return
+
+        if mode == MODE_CAMERA:
             self._poll_live_camera()
+            return
+
+        self._stop_camera_scan()
 
     # trim because qr scanner works somehow only then
     @staticmethod
@@ -150,31 +168,98 @@ class ScanPopup:
         popup.focus_force()
         popup.wait_window()
 
-    def _enable_camera_only_mode(self, camera_index: int) -> bool:
+    def _show_camera_in_use_dialog(self):
+        popup = tk.Toplevel()
+        popup.title("Kamera")
+        popup.attributes("-topmost", True)
+        popup.resizable(False, False)
+        tk.Label(
+            popup,
+            text="Kamera wird bereits von einem anderen Programm verwendet",
+            wraplength=320,
+            justify="center",
+        ).pack(padx=20, pady=14)
+        tk.Button(popup, text="OK", width=10, command=popup.destroy).pack(pady=(0, 12))
+        popup.update_idletasks()
+        x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
+        y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
+        popup.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        popup.focus_force()
+        popup.wait_window()
+
+    def request_camera_selection(self):
+        self._transition_mode((MODE_IDLE,), MODE_CAMERA_SELECTION)
+
+    def _camera_frame_looks_blocked(self, frame) -> bool:
+        if cv2 is None or frame is None:
+            return True
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            mean, stddev = cv2.meanStdDev(gray)
+        except Exception:
+            return True
+
+        brightness = float(mean[0][0])
+        contrast = float(stddev[0][0])
+        return brightness <= 12.0 or contrast <= 4.0
+
+    def _probe_selected_camera(self, camera_index: int) -> bool:
         if cv2 is None:
-            self._show_camera_open_failed_dialog()
             return False
 
-        if self._camera_cap is not None:
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            logger.warning("Camera index %s is not opened during probe", camera_index)
+            cap.release()
+            return False
+
+        try:
+            for _ in range(5):
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                if self._camera_frame_looks_blocked(frame):
+                    logger.warning("Camera index %s returned blocked/dark frames", camera_index)
+                    return False
+                return True
+
+            logger.warning("Camera index %s did not return readable frames", camera_index)
+            return False
+        finally:
+            cap.release()
+
+    def _start_live_camera_scan(self, camera_index: int, return_to_popup: bool = False) -> bool:
+        if cv2 is None:
+            self._show_camera_open_failed_dialog()
+            self._set_mode(MODE_POPUP if return_to_popup else MODE_IDLE)
+            return False
+
+        if (
+            self._camera_cap is not None
+            and (
+                self._selected_camera_index != camera_index
+                or not self._camera_cap.isOpened()
+            )
+        ):
             try:
                 self._camera_cap.release()
             except Exception:
                 pass
             self._camera_cap = None
 
-        cap = cv2.VideoCapture(camera_index)
-        if not cap.isOpened():
-            logger.warning("Failed to open camera index %s", camera_index)
-            cap.release()
-            self._show_camera_open_failed_dialog()
-            return False
+        if self._camera_cap is None:
+            cap = cv2.VideoCapture(camera_index)
+            if not cap.isOpened():
+                logger.warning("Failed to open camera index %s", camera_index)
+                cap.release()
+                self._show_camera_open_failed_dialog()
+                self._set_mode(MODE_POPUP if return_to_popup else MODE_IDLE)
+                return False
+            self._camera_cap = cap
 
-        self._camera_cap = cap
         self._selected_camera_index = camera_index
-        self._camera_only_mode = True
-        self._camera_window_visible = True
-        self._open_requested.clear()
-        self.hide()
+        self._set_mode(MODE_CAMERA)
+        self.hide(change_mode=False)
         try:
             cv2.namedWindow(self._camera_window_name, cv2.WINDOW_NORMAL)
             cv2.waitKey(1)
@@ -182,35 +267,39 @@ class ScanPopup:
             pass
         return True
 
+    def _stop_camera_scan(self):
+        if self._camera_cap is not None:
+            try:
+                self._camera_cap.release()
+            except Exception:
+                pass
+            self._camera_cap = None
+        self._close_camera_window()
+
     def _ensure_live_camera(self) -> bool:
+        if self._get_mode() != MODE_CAMERA:
+            self._stop_camera_scan()
+            return False
         if cv2 is None or self._selected_camera_index is None:
             return False
-        if self._camera_cap is not None and self._camera_cap.isOpened():
-            return True
-        self._camera_cap = cv2.VideoCapture(self._selected_camera_index)
-        if not self._camera_cap.isOpened():
-            logger.warning("Failed to open camera index %s", self._selected_camera_index)
-            self._camera_cap.release()
-            self._camera_cap = None
-            return False
-        return True
+        return self._camera_cap is not None and self._camera_cap.isOpened()
 
     def _poll_live_camera(self):
         if not self._ensure_live_camera() or self._camera_detector is None:
+            self._set_mode(MODE_IDLE)
+            self._stop_camera_scan()
             return
 
         ok, frame = self._camera_cap.read()
         if not ok or frame is None:
             return
 
-        if not self._camera_window_visible:
-            return
-
         text, points, _ = self._camera_detector.detectAndDecode(frame)
         cv2.imshow(self._camera_window_name, frame)
         key = cv2.waitKey(1) & 0xFF
         if key == 27:
-            self._close_camera_window()
+            self._set_mode(MODE_IDLE)
+            self._stop_camera_scan()
             return
 
         try:
@@ -218,7 +307,8 @@ class ScanPopup:
         except Exception:
             visible = 0
         if visible <= 0:
-            self._close_camera_window()
+            self._set_mode(MODE_IDLE)
+            self._stop_camera_scan()
             return
 
         if points is None or not text:
@@ -237,7 +327,8 @@ class ScanPopup:
         if now - self._last_camera_emit_ts < COOLDOWN_S:
             return
         self._last_camera_emit_ts = now
-        self._close_camera_window()
+        self._set_mode(MODE_IDLE)
+        self._stop_camera_scan()
         self.on_scan(text)
 
     def _add_placeholder(self):
@@ -256,16 +347,10 @@ class ScanPopup:
         self._placeholder_active = False
 
     def open(self):
-        with self._state_lock:
-            if self.win and self.win.winfo_exists():
-                self._scan_popup_visible = True
-                needs_focus = True
-            else:
-                if not self._open_in_progress:
-                    self._open_in_progress = True
-                self._scan_popup_visible = True
-                needs_focus = False
-        if needs_focus:
+        if self._popup_is_visible():
+            return
+
+        if self.win and self.win.winfo_exists():
             self._focus()
             return
 
@@ -273,15 +358,22 @@ class ScanPopup:
             self.win = tk.Toplevel(self.root)
             self.win.title("Scan")
             self.win.attributes("-topmost", True)
-            self.win.geometry("800x110+300+200")
+            self.win.geometry("800x150+300+200")
             self.win.resizable(False, False)
-            self.win.protocol("WM_DELETE_WINDOW", self.hide)
+            self.win.protocol("WM_DELETE_WINDOW", lambda: self.hide())
 
             frame = tk.Frame(self.win, padx=12, pady=12)
             frame.pack(fill="both", expand=True)
 
             self.entry = tk.Entry(frame, font=("Rubik", 14))
             self.entry.pack(fill="x", expand=True)
+
+            tk.Button(
+                frame,
+                text="Mit Kamera scannen",
+                width=20,
+                command=self._open_camera_scan_from_popup,
+            ).pack(anchor="e", pady=(12, 0))
 
             self.win.bind("<Escape>", lambda _event: self.hide())
             self.entry.bind("<Escape>", lambda _event: self.hide())
@@ -291,14 +383,12 @@ class ScanPopup:
             self._add_placeholder()
             self.win.wait_visibility()
             self._focus()
-        finally:
-            with self._state_lock:
-                self._open_in_progress = False
+        except tk.TclError:
+            self._set_mode(MODE_IDLE)
 
     def _focus(self):
         if not (self.win and self.entry):
             return
-        self._scan_popup_visible = True
         self.win.deiconify()
         self.win.lift()
 
@@ -306,11 +396,20 @@ class ScanPopup:
         self.win.after(10, lambda: self.entry.focus_set())
         self._add_placeholder()
 
-    def hide(self):
-        with self._state_lock:
-            self._scan_popup_visible = False
+    def hide(self, change_mode: bool = True):
+        if change_mode:
+            self._set_mode(MODE_IDLE)
         if self.win and self.win.winfo_exists():
             self.win.withdraw()
+
+    def _open_camera_scan_from_popup(self):
+        camera_index = self._selected_camera_index
+        if camera_index is None:
+            self._set_mode(MODE_CAMERA_SELECTION)
+            self.hide(change_mode=False)
+            self._run_camera_selection(return_to_popup=True)
+            return
+        self._start_live_camera_scan(camera_index, return_to_popup=True)
 
     def _submit(self, _event=None):
         if not self.entry:
@@ -439,43 +538,24 @@ class ScanPopup:
         popup.wait_window()
         return result["index"]
 
-    def _scan_qr_from_camera(self, camera_index: int) -> Optional[str]:
-        if cv2 is None:
-            logger.warning("OpenCV is not installed, camera QR scan unavailable.")
-            return None
+    def _run_camera_selection(self, return_to_popup: bool):
+        if self._get_mode() != MODE_CAMERA_SELECTION:
+            return
 
-        cap = cv2.VideoCapture(camera_index)
-        if not cap.isOpened():
-            logger.warning("Failed to open camera index %s", camera_index)
-            cap.release()
-            return None
+        while self._get_mode() == MODE_CAMERA_SELECTION:
+            camera_index = self._select_camera_dialog()
+            if camera_index is None:
+                self._set_mode(MODE_POPUP if return_to_popup else MODE_IDLE)
+                if return_to_popup:
+                    self.open()
+                return
 
-        detector = cv2.QRCodeDetector()
-        window_name = f"QR Kamera [{camera_index}]"
+            if self._probe_selected_camera(camera_index):
+                self._selected_camera_index = camera_index
+                self._start_live_camera_scan(camera_index, return_to_popup=return_to_popup)
+                return
 
-        try:
-            while True:
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    return None
-
-                text, points, _ = detector.detectAndDecode(frame)
-                if points is not None and text:
-                    text = self._trim_camera_qr_text(text)
-                    cv2.imshow(window_name, frame)
-                    cv2.waitKey(150)
-                    return text.strip()
-
-                cv2.imshow(window_name, frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (27, ord("q")):
-                    return None
-        finally:
-            cap.release()
-            try:
-                cv2.destroyWindow(window_name)
-            except Exception:
-                cv2.destroyAllWindows()
+            self._show_camera_in_use_dialog()
 
     def resolve_scanned_qr(self, scanned: str) -> Optional[dict]:
         logger.info("Resolving scanned QR")
@@ -488,33 +568,25 @@ class ScanPopup:
         while True:
             action = self._show_qr_error_dialog()
             if action == "rescan":
+                self._set_mode(MODE_POPUP)
                 self.open()
                 return None
 
-            while True:
-                camera_index = self._selected_camera_index
-                if camera_index is None:
-                    camera_index = self._select_camera_dialog()
-                if camera_index is None:
-                    self.open()
-                    return None
+            camera_index = self._selected_camera_index
+            if camera_index is None:
+                self._set_mode(MODE_CAMERA_SELECTION)
+                self._run_camera_selection(return_to_popup=True)
+                return None
 
-                if self._enable_camera_only_mode(camera_index):
-                    return None
-
-                # Camera unavailable: force re-selection from list.
-                self._selected_camera_index = None
+            self._start_live_camera_scan(camera_index, return_to_popup=True)
+            return None
 
     def close(self):
         if self._hotkey_handle is not None:
             keyboard.remove_hotkey(self._hotkey_handle)
         keyboard.remove_hotkey(self._esc_handle)
-        if self._camera_cap is not None:
-            self._camera_cap.release()
-            self._camera_cap = None
-            self._close_camera_window()
+        self._stop_camera_scan()
         if self.win and self.win.winfo_exists():
-            self._scan_popup_visible = False
             self.win.destroy()
 
 
@@ -579,10 +651,7 @@ async def main():
                 msg = None
 
             if msg and msg.get("type") == "OPEN_CAMERA_SELECTION":
-                camera_index = popup._select_camera_dialog()
-                if camera_index is not None:
-                    popup._selected_camera_index = camera_index
-                    popup._enable_camera_only_mode(camera_index)
+                popup.request_camera_selection()
 
             await asyncio.sleep(0.03)
     except tk.TclError:

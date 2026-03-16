@@ -52,7 +52,7 @@ class WeighingApp(tk.Tk):
         self.title("Judo Weighing Station")
         width = self.winfo_screenwidth()
         height = self.winfo_screenheight()
-        self.geometry(f"{width}x{height}+0+0")
+        self.geometry(f"{width}x{height-50}+0+0")
         self.configure(bg=THEME["bg"])
         
         self.participants: List[Dict[str, Any]] = []
@@ -1050,7 +1050,7 @@ class WeighingApp(tk.Tk):
 
     def format_scale_weight(self, raw_weight: int) -> str:
         """Formats integer scale input based on configured decimal places."""
-        places = self.weight_decimal_places if self.weight_decimal_places in [0, 1, 2, 3] else 1
+        places = self.weight_decimal_places
         value = raw_weight / (10 ** places)
         return f"{value:.{places}f}"
 
@@ -1226,9 +1226,9 @@ class WeighingApp(tk.Tk):
             self.update_list(self.participants)
             self.saved_form_snapshot = self.get_form_snapshot()
             self.update_save_button_state()
-            messagebox.showinfo("Saved", f"Updated: {full_name}")
+            messagebox.showinfo("Gespeichert", f"Aktualisiert: {full_name}")
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save data: {e}")
+            messagebox.showerror("Fehler", f"Daten konnten nicht gespeichert werden: {e}")
 
     def delete_selected_participant(self):
         """Deletes currently selected participant after explicit confirmation."""
@@ -1262,6 +1262,7 @@ class WeighingApp(tk.Tk):
 
     def open_add_participant_window(self):
         """Opens a dialog to manually create a new participant."""
+
         if self.add_participant_popup and self.add_participant_popup.winfo_exists():
             self.add_participant_popup.lift()
             self.add_participant_popup.focus_force()
@@ -1269,69 +1270,150 @@ class WeighingApp(tk.Tk):
 
         popup = tk.Toplevel(self)
         popup.title("Neuen Teilnehmer hinzufügen")
-        popup.geometry("400x560")
+        popup.geometry("460x480")
         popup.configure(bg=THEME["bg"])
         self.add_participant_popup = popup
 
+        popup.columnconfigure(1, weight=1)
+
         lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Rubik", 11)}
-        entry_style = {"bg": THEME["input_bg"], "fg": "#f0f0f2", "font": ("Rubik", 11), "insertbackground": "#f0f0f2"}
-        radio_style = {"bg": THEME["bg"], "fg": THEME["fg"], "selectcolor": THEME["secondary"]}
+        entry_style = {
+            "bg": THEME["input_bg"],
+            "fg": "#f0f0f2",
+            "font": ("Rubik", 11),
+            "insertbackground": "#f0f0f2"
+        }
 
-        tk.Label(popup, text="First Name", **lbl_style).pack(pady=(15, 5))
+        radio_style = {
+            "bg": THEME["bg"],
+            "fg": THEME["fg"],
+            "selectcolor": THEME["secondary"],
+            "anchor": "w",
+            "font": ("Rubik", 11),
+            "width": 12, 
+        }
+
+        row = 0
+        padding_y = 10
+
+        tk.Label(popup, text="Vorname", **lbl_style).grid(
+            row=row, column=0, padx=20, pady=(40, 10), sticky="w"
+        )
         e_first = tk.Entry(popup, **entry_style)
-        e_first.pack(fill=tk.X, padx=20)
+        e_first.grid(row=row, column=1, padx=20, pady=(40, 10), sticky="ew")
+        row += 1
 
-        tk.Label(popup, text="Last Name", **lbl_style).pack(pady=(10, 5))
+        tk.Label(popup, text="Nachname", **lbl_style).grid(
+            row=row, column=0, padx=20, pady=padding_y, sticky="w"
+        )
         e_last = tk.Entry(popup, **entry_style)
-        e_last.pack(fill=tk.X, padx=20)
+        e_last.grid(row=row, column=1, padx=20, pady=padding_y, sticky="ew")
+        row += 1
 
-        tk.Label(popup, text="Club", **lbl_style).pack(pady=(10, 5))
+        tk.Label(popup, text="Verein", **lbl_style).grid(
+            row=row, column=0, padx=20, pady=padding_y, sticky="w"
+        )
         e_club = tk.Entry(popup, **entry_style)
-        e_club.pack(fill=tk.X, padx=20)
+        e_club.grid(row=row, column=1, padx=20, pady=padding_y, sticky="ew")
+        row += 1
 
-        tk.Label(popup, text="Birthyear", **lbl_style).pack(pady=(10, 5))
+        tk.Label(popup, text="Geburtsjahr", **lbl_style).grid(
+            row=row, column=0, padx=20, pady=padding_y, sticky="w"
+        )
         e_birthyear = tk.Entry(popup, **entry_style)
-        e_birthyear.pack(fill=tk.X, padx=20)
+        e_birthyear.grid(row=row, column=1, padx=20, pady=padding_y, sticky="ew")
+        row += 1
 
-        tk.Label(popup, text="Gender", **lbl_style).pack(pady=(10, 5))
+        tk.Label(popup, text="Geschlecht", **lbl_style).grid(
+            row=row, column=0, padx=20, pady=padding_y, sticky="w"
+        )
+
         gender_var = tk.StringVar(value="männlich")
+
         g_frame = tk.Frame(popup, bg=THEME["bg"])
-        g_frame.pack()
-        tk.Radiobutton(g_frame, text="männlich", variable=gender_var, value="männlich",
-                       bg=THEME["bg"], fg=THEME["fg"], selectcolor=THEME["secondary"]).pack(side=tk.LEFT, padx=10)
-        tk.Radiobutton(g_frame, text="weiblich", variable=gender_var, value="weiblich",
-                       bg=THEME["bg"], fg=THEME["fg"], selectcolor=THEME["secondary"]).pack(side=tk.LEFT, padx=10)
+        g_frame.grid(row=row, column=1, padx=20, pady=padding_y, sticky="w")
 
-        tk.Label(popup, text="Gültigkeit", **lbl_style).pack(pady=(10, 5))
+        tk.Radiobutton(
+            g_frame,
+            text="männlich",
+            variable=gender_var,
+            value="männlich",
+            **radio_style
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Radiobutton(
+            g_frame,
+            text="weiblich",
+            variable=gender_var,
+            value="weiblich",
+            **radio_style
+        ).pack(side=tk.LEFT, padx=5)
+
+        row += 1
+
+        tk.Label(popup, text="Gültigkeit", **lbl_style).grid(
+            row=row, column=0, padx=20, pady=padding_y, sticky="w"
+        )
+
         valid_var = tk.StringVar(value="ungültig")
-        valid_frame = tk.Frame(popup, bg=THEME["bg"])
-        valid_frame.pack()
-        tk.Radiobutton(
-            valid_frame, text="gültig", variable=valid_var, value="gültig", **radio_style
-        ).pack(side=tk.LEFT, padx=10)
-        tk.Radiobutton(
-            valid_frame, text="ungültig", variable=valid_var, value="ungültig", **radio_style
-        ).pack(side=tk.LEFT, padx=10)
 
-        tk.Label(popup, text="Zahlung", **lbl_style).pack(pady=(10, 5))
+        valid_frame = tk.Frame(popup, bg=THEME["bg"])
+        valid_frame.grid(row=row, column=1, padx=20, pady=padding_y, sticky="w")
+
+        tk.Radiobutton(
+            valid_frame,
+            text="gültig",
+            variable=valid_var,
+            value="gültig",
+            **radio_style
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Radiobutton(
+            valid_frame,
+            text="ungültig",
+            variable=valid_var,
+            value="ungültig",
+            **radio_style
+        ).pack(side=tk.LEFT, padx=5)
+
+        row += 1
+
+        tk.Label(popup, text="Zahlung", **lbl_style).grid(
+            row=row, column=0, padx=20, pady=padding_y, sticky="w"
+        )
+
         paid_var = tk.StringVar(value=UNPAID)
+
         paid_frame = tk.Frame(popup, bg=THEME["bg"])
-        paid_frame.pack()
+        paid_frame.grid(row=row, column=1, padx=20, pady=padding_y, sticky="w")
+
         tk.Radiobutton(
-            paid_frame, text=PAID, variable=paid_var, value=PAID, **radio_style
-        ).pack(side=tk.LEFT, padx=10)
+            paid_frame,
+            text=PAID,
+            variable=paid_var,
+            value=PAID,
+            **radio_style
+        ).pack(side=tk.LEFT, padx=5)
+
         tk.Radiobutton(
-            paid_frame, text=UNPAID, variable=paid_var, value=UNPAID, **radio_style
-        ).pack(side=tk.LEFT, padx=10)
+            paid_frame,
+            text=UNPAID,
+            variable=paid_var,
+            value=UNPAID,
+            **radio_style
+        ).pack(side=tk.LEFT, padx=5)
+
+        row += 1
 
         button_frame = tk.Frame(popup, bg=THEME["bg"])
-        button_frame.pack(pady=25)
+        button_frame.grid(row=row, column=0, columnspan=2, pady=25)
 
         tk.Button(
             button_frame,
-            text="Save",
+            text="Speichern",
             command=lambda: self.save_new_participant(
-                popup, e_first, e_last, e_club, e_birthyear, gender_var, valid_var, paid_var
+                popup, e_first, e_last, e_club, e_birthyear,
+                gender_var, valid_var, paid_var
             ),
             bg=THEME["success"],
             fg="black",
@@ -1341,7 +1423,7 @@ class WeighingApp(tk.Tk):
 
         tk.Button(
             button_frame,
-            text="Cancel",
+            text="Abbrechen",
             command=popup.destroy,
             bg=THEME["error"],
             fg="#f0f0f2",
@@ -1409,7 +1491,7 @@ class WeighingApp(tk.Tk):
             "Lastname": last,
             "Name": f"{first} {last}",
             BIRTHYEAR_KEY: birth_year,
-            "Club": club if club else None,
+            "Club": club if club else "Ohne Verein",
             WEIGHT_KEY: 0.0,
             VALID_KEY: is_valid,
             "Gender": WeighingApp.normalize_json_gender(gender),
@@ -1424,9 +1506,9 @@ class WeighingApp(tk.Tk):
                 self.add_participant_popup = None
                 self.add_participant_fields = {}
             popup.destroy()
-            messagebox.showinfo("Saved", f"Added participant: {first} {last}")
+            messagebox.showinfo("Gespeichert", f"Teilnehmer hinzugefügt: {first} {last}")
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save participant: {e}", parent=popup)
+            messagebox.showerror("Fehler", f"Teilnehmer konnte nicht gespeichert werden: {e}", parent=popup)
 
     def open_settings_window(self):
         """Opens a dialog to configure app settings."""
@@ -1597,7 +1679,7 @@ class WeighingApp(tk.Tk):
 
         tk.Button(
             button_frame,
-            text="Save",
+            text="Speichern",
             command=save_and_close,
             bg=THEME["success"],
             fg="black",
@@ -1607,7 +1689,7 @@ class WeighingApp(tk.Tk):
 
         tk.Button(
             button_frame,
-            text="Cancel",
+            text="Abbrechen",
             command=_on_settings_close,
             bg=THEME["error"],
             fg="#f0f0f2",
@@ -1873,7 +1955,7 @@ class WeighingApp(tk.Tk):
         """Returns best available full name for the currently selected participant."""
         p = self.selected_participant
         if not p:
-            return "Keine Person ausgewahlt"
+            return "Keine Person ausgewählt"
 
         first = str(p.get("Firstname") or "").strip()
         last = str(p.get("Lastname") or "").strip()
@@ -1937,7 +2019,7 @@ class WeighingApp(tk.Tk):
 
             hint_label = tk.Label(
                 popup,
-                text="Weight Übernehmen?",
+                text="Gewicht Übernehmen?",
                 bg=THEME["bg"],
                 fg="gray",
                 font=("Rubik", 10),
