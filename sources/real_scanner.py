@@ -73,6 +73,7 @@ class ScanPopup:
         self._placeholder_active = False
         self._mode = MODE_IDLE
         self._selected_camera_index: Optional[int] = None
+        self._camera_selection_running = False
         self._camera_cap = None
         self._camera_detector = cv2.QRCodeDetector() if cv2 is not None else None
         self._last_camera_emit_ts = 0.0
@@ -187,7 +188,12 @@ class ScanPopup:
         popup.focus_force()
         popup.wait_window()
 
+    def _reset_selected_camera(self):
+        self._selected_camera_index = None
+
     def request_camera_selection(self):
+        if self._camera_selection_running:
+            return
         self._transition_mode((MODE_IDLE,), MODE_CAMERA_SELECTION)
 
     def _camera_frame_looks_blocked(self, frame) -> bool:
@@ -201,7 +207,7 @@ class ScanPopup:
 
         brightness = float(mean[0][0])
         contrast = float(stddev[0][0])
-        return brightness <= 12.0 or contrast <= 4.0
+        return brightness <= 3.0 or contrast <= 1.0
 
     def _probe_selected_camera(self, camera_index: int) -> bool:
         if cv2 is None:
@@ -292,6 +298,10 @@ class ScanPopup:
 
         ok, frame = self._camera_cap.read()
         if not ok or frame is None:
+            self._set_mode(MODE_IDLE)
+            self._stop_camera_scan()
+            self._reset_selected_camera()
+            self._show_camera_in_use_dialog()
             return
 
         text, points, _ = self._camera_detector.detectAndDecode(frame)
@@ -541,21 +551,27 @@ class ScanPopup:
     def _run_camera_selection(self, return_to_popup: bool):
         if self._get_mode() != MODE_CAMERA_SELECTION:
             return
+        if self._camera_selection_running:
+            return
 
-        while self._get_mode() == MODE_CAMERA_SELECTION:
-            camera_index = self._select_camera_dialog()
-            if camera_index is None:
-                self._set_mode(MODE_POPUP if return_to_popup else MODE_IDLE)
-                if return_to_popup:
-                    self.open()
-                return
+        self._camera_selection_running = True
+        try:
+            while self._get_mode() == MODE_CAMERA_SELECTION:
+                camera_index = self._select_camera_dialog()
+                if camera_index is None:
+                    self._set_mode(MODE_POPUP if return_to_popup else MODE_IDLE)
+                    if return_to_popup:
+                        self.open()
+                    return
 
-            if self._probe_selected_camera(camera_index):
-                self._selected_camera_index = camera_index
-                self._start_live_camera_scan(camera_index, return_to_popup=return_to_popup)
-                return
+                if self._probe_selected_camera(camera_index):
+                    self._selected_camera_index = camera_index
+                    self._start_live_camera_scan(camera_index, return_to_popup=return_to_popup)
+                    return
 
-            self._show_camera_in_use_dialog()
+                self._show_camera_in_use_dialog()
+        finally:
+            self._camera_selection_running = False
 
     def resolve_scanned_qr(self, scanned: str) -> Optional[dict]:
         logger.info("Resolving scanned QR")

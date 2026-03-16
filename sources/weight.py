@@ -20,6 +20,86 @@ DECODE_W, DECODE_H = 80, 140
 MIN_DIGITS, MAX_DIGITS = 3, 5
 
 
+def _show_camera_in_use_dialog():
+    root = tk.Tk()
+    root.withdraw()
+
+    popup = tk.Toplevel(root)
+    popup.title("Kamera")
+    popup.attributes("-topmost", True)
+    popup.resizable(False, False)
+    tk.Label(
+        popup,
+        text="Kamera wird bereits von einem anderen Programm verwendet",
+        wraplength=320,
+        justify="center",
+    ).pack(padx=20, pady=14)
+    tk.Button(popup, text="OK", width=10, command=popup.destroy).pack(pady=(0, 12))
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
+    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
+    popup.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    popup.focus_force()
+    popup.wait_window()
+
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
+def _camera_frame_looks_blocked(frame) -> bool:
+    if frame is None:
+        return True
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mean, stddev = cv2.meanStdDev(gray)
+    except Exception:
+        return True
+
+    brightness = float(mean[0][0])
+    contrast = float(stddev[0][0])
+    return brightness <= 3.0 or contrast <= 1.0
+
+
+def _probe_selected_camera(camera_index: int) -> bool:
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        logger.warning("Camera index %s is not opened during probe", camera_index)
+        cap.release()
+        return False
+
+    try:
+        for _ in range(5):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            if _camera_frame_looks_blocked(frame):
+                logger.warning("Camera index %s returned blocked/dark frames", camera_index)
+                return False
+            return True
+
+        logger.warning("Camera index %s did not return readable frames", camera_index)
+        return False
+    finally:
+        cap.release()
+
+
+def _camera_capture_is_usable(cap, camera_index: int) -> bool:
+    for _ in range(5):
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        if _camera_frame_looks_blocked(frame):
+            logger.warning("Camera index %s returned blocked/dark frames", camera_index)
+            return False
+        return True
+
+    logger.warning("Camera index %s did not return readable frames", camera_index)
+    return False
+
+
 def select_camera_index() -> int:
     cameras = list_available_cameras()
     if not cameras:
@@ -77,6 +157,17 @@ def select_camera_index() -> int:
     if result["index"] is None:
         raise RuntimeError("Kameraauswahl abgebrochen.")
     return result["index"]
+
+
+_select_camera_index_once = select_camera_index
+
+
+def select_camera_index() -> int:
+    while True:
+        camera_index = _select_camera_index_once()
+        if _probe_selected_camera(camera_index):
+            return camera_index
+        _show_camera_in_use_dialog()
 
 def red_mask(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -377,9 +468,19 @@ async def main(cam_index: int = 0):
         if not opened_cap.isOpened():
             opened_cap.release()
             raise RuntimeError("Webcam cannot be opened.")
+        if not _camera_capture_is_usable(opened_cap, camera_index):
+            opened_cap.release()
+            raise RuntimeError("Camera is already in use.")
         return opened_cap
 
-    cap = open_camera(cam_index)
+    while True:
+        try:
+            cap = open_camera(cam_index)
+            break
+        except RuntimeError as exc:
+            logger.warning("Opening selected camera failed: %s", exc)
+            _show_camera_in_use_dialog()
+            cam_index = select_camera_index()
 
     last_boxes = None
 
@@ -435,6 +536,7 @@ async def main(cam_index: int = 0):
                     new_cap = open_camera(selected_camera)
                 except RuntimeError as exc:
                     logger.warning("Opening selected camera failed: %s", exc)
+                    _show_camera_in_use_dialog()
                     continue
 
                 cap.release()
