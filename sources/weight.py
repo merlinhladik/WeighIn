@@ -6,6 +6,7 @@ import numpy as np
 import logging
 import tkinter as tk
 import asyncio
+import time
 import websockets
 from wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
 from list_available_cameras import list_available_cameras
@@ -49,6 +50,83 @@ def _show_camera_in_use_dialog():
         pass
 
 
+def _camera_name_for_index(camera_index: int) -> str:
+    for idx, name in list_available_cameras():
+        if idx == camera_index:
+            return name
+    return f"Kamera {camera_index}"
+
+
+def _show_camera_probe_dialog():
+    root = tk.Tk()
+    root.withdraw()
+
+    popup = tk.Toplevel(root)
+    popup.title("Kamera")
+    popup.attributes("-topmost", True)
+    popup.resizable(False, False)
+    popup.protocol("WM_DELETE_WINDOW", lambda: None)
+    tk.Label(
+        popup,
+        text="Überprüfen der Kamera, bitte warten...",
+        padx=28,
+        pady=18,
+    ).pack()
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
+    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
+    popup.geometry(f"200x100+{max(x, 0)}+{max(y, 0)}")
+    popup.focus_force()
+    popup.grab_set()
+    popup.update()
+    return root, popup
+
+
+def _close_camera_probe_dialog(root, popup):
+    try:
+        popup.grab_release()
+    except Exception:
+        pass
+    try:
+        popup.destroy()
+    except tk.TclError:
+        pass
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
+def _show_camera_probe_success_dialog(camera_name: str):
+    root = tk.Tk()
+    root.withdraw()
+
+    popup = tk.Toplevel(root)
+    popup.title("Kamera")
+    popup.attributes("-topmost", True)
+    popup.resizable(False, False)
+    tk.Label(
+        popup,
+        text=f"{camera_name}\nerfolgreich eingesetzt fur Waage",
+        wraplength=340,
+        justify="center",
+    ).pack(padx=20, pady=14)
+    tk.Button(popup, text="OK", width=10, command=popup.destroy).pack(pady=(0, 12))
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
+    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
+    popup.geometry(f"200x100+{max(x, 0)}+{max(y, 0)}")
+    popup.focus_force()
+    popup.wait_window()
+
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
 def _camera_frame_looks_blocked(frame) -> bool:
     if frame is None:
         return True
@@ -64,26 +142,36 @@ def _camera_frame_looks_blocked(frame) -> bool:
 
 
 def _probe_selected_camera(camera_index: int) -> bool:
+    probe_root, probe_popup = _show_camera_probe_dialog()
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         logger.warning("Camera index %s is not opened during probe", camera_index)
         cap.release()
+        _close_camera_probe_dialog(probe_root, probe_popup)
         return False
 
     try:
-        for _ in range(5):
+        time.sleep(0.3)
+        good_frames = 0
+        for _ in range(10):
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
             if _camera_frame_looks_blocked(frame):
-                logger.warning("Camera index %s returned blocked/dark frames", camera_index)
-                return False
-            return True
+                continue
+            good_frames += 1
+            if good_frames >= 2:
+                return True
 
-        logger.warning("Camera index %s did not return readable frames", camera_index)
+        logger.warning(
+            "Camera index %s only returned %s good frames during probe",
+            camera_index,
+            good_frames,
+        )
         return False
     finally:
         cap.release()
+        _close_camera_probe_dialog(probe_root, probe_popup)
 
 
 def _camera_capture_is_usable(cap, camera_index: int) -> bool:
@@ -166,6 +254,7 @@ def select_camera_index() -> int:
     while True:
         camera_index = _select_camera_index_once()
         if _probe_selected_camera(camera_index):
+            _show_camera_probe_success_dialog(_camera_name_for_index(camera_index))
             return camera_index
         _show_camera_in_use_dialog()
 
