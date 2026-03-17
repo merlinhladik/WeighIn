@@ -1,8 +1,14 @@
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
+
+
+SOFT_STOP_TIMEOUT_S = 5.0
+HARD_STOP_TIMEOUT_S = 2.0
 
 
 def _binary_name(name):
@@ -32,20 +38,65 @@ def _elevated_command(binary_path):
 def _start_process(base, name, requires_root=False):
     binary_path = _binary_path(base, name)
     command = _elevated_command(binary_path) if requires_root else [binary_path]
-    return subprocess.Popen(command, cwd=base)
+    popen_kwargs = {"cwd": base}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["preexec_fn"] = os.setsid
+    return subprocess.Popen(command, **popen_kwargs)
+
+
+def _wait_for_exit(process, timeout_s):
+    try:
+        process.wait(timeout=timeout_s)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def _stop_process(process):
-    if process.poll() is not None:
+    if process is None:
         return
 
-    process.terminate()
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        if process.poll() is not None:
+            return
 
+        pid = process.pid
 
+        # --- Linux / macOS ---
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except Exception:
+                process.terminate()
+
+            if not _wait_for_exit(process, SOFT_STOP_TIMEOUT_S):
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except Exception:
+                    process.kill()
+                _wait_for_exit(process, HARD_STOP_TIMEOUT_S)
+
+        # --- Windows ---
+        else:
+            subprocess.run(
+                ["taskkill", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            if not _wait_for_exit(process, SOFT_STOP_TIMEOUT_S):
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                _wait_for_exit(process, HARD_STOP_TIMEOUT_S)
+
+    except Exception as e:
+        print(f"Failed to stop process: {e}")
+
+        
 def main():
     base = os.path.dirname(sys.executable)
 

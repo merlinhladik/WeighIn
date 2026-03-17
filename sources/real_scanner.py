@@ -6,6 +6,9 @@ import base64
 import json
 import asyncio
 import time
+import os
+import sys
+import tempfile
 import tkinter as tk
 from typing import Optional, Tuple
 from wsclient import WebSocketClient, QRClient, WebSocketDisconnected
@@ -13,6 +16,14 @@ import keyboard
 import logging
 import websockets
 from list_available_cameras import list_available_cameras
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 try:
     import cv2
@@ -32,6 +43,77 @@ MODE_IDLE = "idle"
 MODE_POPUP = "popup"
 MODE_CAMERA_SELECTION = "camera_selection"
 MODE_CAMERA = "camera"
+SCANNER_INSTANCE_LOCK_NAME = "top_weightin_real_scanner"
+
+
+class SingleInstanceLock:
+    def __init__(self, name: str):
+        self.path = os.path.join(tempfile.gettempdir(), f"{name}.lock")
+        self._handle = None
+
+    def acquire(self) -> bool:
+        self._handle = open(self.path, "a+", encoding="utf-8")
+        try:
+            self._lock_file()
+            self._handle.seek(0)
+            self._handle.truncate()
+            self._handle.write(str(os.getpid()))
+            self._handle.flush()
+            logger.info(
+                "[LOCK] acquired name=%s path=%s pid=%s",
+                SCANNER_INSTANCE_LOCK_NAME,
+                self.path,
+                os.getpid(),
+            )
+            return True
+        except OSError:
+            holder_pid = self.read_holder_pid()
+            logger.warning(
+                "[LOCK] busy name=%s path=%s pid=%s holder_pid=%s",
+                SCANNER_INSTANCE_LOCK_NAME,
+                self.path,
+                os.getpid(),
+                holder_pid,
+            )
+            self.release()
+            return False
+
+    def _lock_file(self):
+        if msvcrt is not None:
+            self._handle.seek(0)
+            msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        if fcntl is not None:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+
+    def release(self):
+        if self._handle is None:
+            return
+        try:
+            if msvcrt is not None:
+                self._handle.seek(0)
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            logger.info(
+                "[LOCK] released name=%s path=%s pid=%s",
+                SCANNER_INSTANCE_LOCK_NAME,
+                self.path,
+                os.getpid(),
+            )
+            self._handle.close()
+            self._handle = None
+
+    def read_holder_pid(self) -> str:
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                return (f.read() or "").strip() or "unknown"
+        except OSError:
+            return "unknown"
 
 
 def base64url_decode(data: str) -> bytes:
@@ -62,6 +144,7 @@ def parse_dokume_qr(url: str) -> dict:
         "birth_year": int(birthyear),
         "exp_timestamp": int(exp),
     }
+
 
 class ScanPopup:
     def __init__(self, root: tk.Tk, on_scan):
@@ -464,6 +547,7 @@ class ScanPopup:
             self._focus()
             return
 
+        print ("Opening scan popup")
         try:
             self.win = tk.Toplevel(self.root)
             self.win.title("Scan")
@@ -662,10 +746,12 @@ class ScanPopup:
 
         try:
             while self._get_mode() == MODE_CAMERA_SELECTION:
+                print("Running camera selection")
                 camera_index = self._select_camera_dialog()
                 if camera_index is None:
                     self._set_mode(MODE_POPUP if return_to_popup else MODE_IDLE)
                     if return_to_popup:
+                        print("Returning to scan popup")
                         self.open()
                     return
 
@@ -772,8 +858,10 @@ async def main():
                 await qr_client.register()
                 msg = None
 
-            if msg and msg.get("type") == "OPEN_CAMERA_SELECTION":
-                popup.request_camera_selection()
+            if msg:
+                msg_type = msg.get("type")
+                if msg_type == "OPEN_CAMERA_SELECTION":
+                    popup.request_camera_selection()
 
             await asyncio.sleep(0.03)
     except tk.TclError:
@@ -788,4 +876,22 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logger.info(
+        "[STARTUP] real_scanner boot pid=%s executable=%s argv=%s cwd=%s",
+        os.getpid(),
+        sys.executable,
+        sys.argv,
+        os.getcwd(),
+    )
+    instance_lock = SingleInstanceLock(SCANNER_INSTANCE_LOCK_NAME)
+    if not instance_lock.acquire():
+        logger.warning(
+            "Another real_scanner instance is already running; exiting pid=%s executable=%s",
+            os.getpid(),
+            sys.executable,
+        )
+        raise SystemExit(0)
+    try:
+        asyncio.run(main())
+    finally:
+        instance_lock.release()

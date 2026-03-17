@@ -1122,6 +1122,7 @@ class WeighingApp(tk.Tk):
     def trigger_qr_scan_hotkey(self, _event=None):
         """Triggers scanner popup hotkey (F12) from GUI click."""
         try:
+            print("Triggering QR scan hotkey (F12)")
             keyboard.press_and_release("F12")
         except Exception as e:
             messagebox.showerror("QR Scan", f"F12 konnte nicht ausgelost werden: {e}")
@@ -1795,6 +1796,13 @@ class WeighingApp(tk.Tk):
                 ),
             )
             return
+
+        if target_role == "scanner" and len(candidate_clients) > 1:
+            print(
+                f"[WebSocket] Multiple scanner clients connected ({len(candidate_clients)}); "
+                "sending camera selection request to one client only."
+            )
+            candidate_clients = candidate_clients[:1]
 
         msg = json.dumps({"type": "OPEN_CAMERA_SELECTION"}, ensure_ascii=False)
         stale = []
