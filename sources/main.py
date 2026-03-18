@@ -9,6 +9,12 @@ import time
 
 SOFT_STOP_TIMEOUT_S = 5.0
 HARD_STOP_TIMEOUT_S = 2.0
+ASKPASS_CANDIDATES = (
+    "ssh-askpass",
+    "ksshaskpass",
+    "ksshaskpass5",
+    "lxqt-sudo",
+)
 
 
 def _binary_name(name):
@@ -36,7 +42,19 @@ def _linux_display_env():
     return env
 
 
-def _elevated_command(binary_path):
+def _resolve_askpass():
+    explicit = os.environ.get("SUDO_ASKPASS")
+    if explicit and os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+        return explicit
+
+    for program in ASKPASS_CANDIDATES:
+        found = shutil.which(program)
+        if found:
+            return found
+    return None
+
+
+def _elevated_command(binary_path, askpass_path=None):
     if sys.platform == "darwin":
         quoted_path = shlex.quote(binary_path)
         script = f"do shell script {quoted_path!r} with administrator privileges"
@@ -47,6 +65,8 @@ def _elevated_command(binary_path):
             return [binary_path]
         if shutil.which("sudo"):
             # Keep DISPLAY/XAUTHORITY and session vars for GUI apps.
+            if askpass_path:
+                return ["sudo", "-A", "-E", binary_path]
             return ["sudo", "-E", binary_path]
         if shutil.which("pkexec"):
             return ["pkexec", binary_path]
@@ -57,11 +77,14 @@ def _elevated_command(binary_path):
 
 def _start_process(base, name, requires_root=False):
     binary_path = _binary_path(base, name)
-    command = _elevated_command(binary_path) if requires_root else [binary_path]
+    askpass_path = _resolve_askpass() if requires_root and sys.platform.startswith("linux") else None
+    command = _elevated_command(binary_path, askpass_path=askpass_path) if requires_root else [binary_path]
 
     env = os.environ.copy()
     if sys.platform.startswith("linux"):
         env.update(_linux_display_env())
+        if askpass_path:
+            env["SUDO_ASKPASS"] = askpass_path
 
     popen_kwargs = {"cwd": base, "env": env}
     if os.name == "nt":
