@@ -21,6 +21,21 @@ def _binary_path(base, name):
     return os.path.join(base, _binary_name(name))
 
 
+def _linux_display_env():
+    env = {}
+    for key in (
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
+
+
 def _elevated_command(binary_path):
     if sys.platform == "darwin":
         quoted_path = shlex.quote(binary_path)
@@ -28,9 +43,14 @@ def _elevated_command(binary_path):
         return ["osascript", "-e", script]
 
     if sys.platform.startswith("linux"):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return [binary_path]
+        if shutil.which("sudo"):
+            # Keep DISPLAY/XAUTHORITY and session vars for GUI apps.
+            return ["sudo", "-E", binary_path]
         if shutil.which("pkexec"):
             return ["pkexec", binary_path]
-        return ["sudo", binary_path]
+        return [binary_path]
 
     return [binary_path]
 
@@ -40,7 +60,9 @@ def _start_process(base, name, requires_root=False):
     command = _elevated_command(binary_path) if requires_root else [binary_path]
 
     env = os.environ.copy()
-    env["DIST"] = base
+    if sys.platform.startswith("linux"):
+        env.update(_linux_display_env())
+
     popen_kwargs = {"cwd": base, "env": env}
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
