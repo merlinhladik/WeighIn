@@ -304,7 +304,7 @@ class ScanPopup:
         popup.update_idletasks()
         x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
         y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
-        popup.geometry(f"200x100+{max(x, 0)}+{max(y, 0)}")
+        popup.geometry(f"300x100+{max(x, 0)}+{max(y, 0)}")
         popup.focus_force()
         popup.grab_set()
         popup.update()
@@ -336,7 +336,7 @@ class ScanPopup:
         popup.resizable(False, False)
         tk.Label(
             popup,
-            text=f"{camera_name}\nerfolgreich eingesetzt fur Scanner",
+            text=f"{camera_name}\nerfolgreich eingesetzt für Scanner",
             justify="center",
             wraplength=340,
         ).pack(padx=20, pady=14)
@@ -344,7 +344,7 @@ class ScanPopup:
         popup.update_idletasks()
         x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
         y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
-        popup.geometry(f"200x100+{max(x, 0)}+{max(y, 0)}")
+        popup.geometry(f"400x100+{max(x, 0)}+{max(y, 0)}")
         popup.focus_force()
         popup.wait_window()
 
@@ -547,7 +547,6 @@ class ScanPopup:
             self._focus()
             return
 
-        print ("Opening scan popup")
         try:
             self.win = tk.Toplevel(self.root)
             self.win.title("Scan")
@@ -746,12 +745,10 @@ class ScanPopup:
 
         try:
             while self._get_mode() == MODE_CAMERA_SELECTION:
-                print("Running camera selection")
                 camera_index = self._select_camera_dialog()
                 if camera_index is None:
                     self._set_mode(MODE_POPUP if return_to_popup else MODE_IDLE)
                     if return_to_popup:
-                        print("Returning to scan popup")
                         self.open()
                     return
 
@@ -824,11 +821,16 @@ async def main():
             logger.exception("on_scan failed")
 
     popup = ScanPopup(root, on_scan)
+    shutdown_requested = False
 
     try:
         await connect_with_retry()
         await qr_client.register()
         while True:
+            if shutdown_requested:
+                logger.info("Shutdown requested by GUI message")
+                break
+
             popup.process_requests()
             root.update_idletasks()
             root.update()
@@ -860,6 +862,9 @@ async def main():
 
             if msg:
                 msg_type = msg.get("type")
+                if msg_type == "SHUTDOWN":
+                    shutdown_requested = True
+                    continue
                 if msg_type == "OPEN_CAMERA_SELECTION":
                     popup.request_camera_selection()
 

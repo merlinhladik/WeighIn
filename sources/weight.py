@@ -76,7 +76,7 @@ def _show_camera_probe_dialog():
     popup.update_idletasks()
     x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
     y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
-    popup.geometry(f"200x100+{max(x, 0)}+{max(y, 0)}")
+    popup.geometry(f"300x100+{max(x, 0)}+{max(y, 0)}")
     popup.focus_force()
     popup.grab_set()
     popup.update()
@@ -108,7 +108,7 @@ def _show_camera_probe_success_dialog(camera_name: str):
     popup.resizable(False, False)
     tk.Label(
         popup,
-        text=f"{camera_name}\nerfolgreich eingesetzt fur Waage",
+        text=f"{camera_name}\nerfolgreich eingesetzt für Waage",
         wraplength=340,
         justify="center",
     ).pack(padx=20, pady=14)
@@ -117,7 +117,7 @@ def _show_camera_probe_success_dialog(camera_name: str):
     popup.update_idletasks()
     x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
     y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
-    popup.geometry(f"200x100+{max(x, 0)}+{max(y, 0)}")
+    popup.geometry(f"400x100+{max(x, 0)}+{max(y, 0)}")
     popup.focus_force()
     popup.wait_window()
 

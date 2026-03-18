@@ -15,6 +15,10 @@ try:
     import keyboard
 except Exception:
     keyboard = None
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 PAID = "Zahlung erfolgt"
@@ -1122,7 +1126,7 @@ class WeighingApp(tk.Tk):
     def trigger_qr_scan_hotkey(self, _event=None):
         """Triggers scanner popup hotkey (F12) from GUI click."""
         try:
-            print("Triggering QR scan hotkey (F12)")
+            logger.info("Triggering QR scan hotkey (F12)")
             keyboard.press_and_release("F12")
         except Exception as e:
             messagebox.showerror("QR Scan", f"F12 konnte nicht ausgelost werden: {e}")
@@ -1798,7 +1802,7 @@ class WeighingApp(tk.Tk):
             return
 
         if target_role == "scanner" and len(candidate_clients) > 1:
-            print(
+            logger.info(
                 f"[WebSocket] Multiple scanner clients connected ({len(candidate_clients)}); "
                 "sending camera selection request to one client only."
             )
@@ -1838,10 +1842,10 @@ class WeighingApp(tk.Tk):
         asyncio.set_event_loop(self.ws_loop)
         try:
             self.ws_server = self.ws_loop.run_until_complete(self._start_ws_server())
-            print(f"[WebSocket] Server running on ws://{WS_HOST}:{WS_PORT}")
+            logger.info(f"[WebSocket] Server running on ws://{WS_HOST}:{WS_PORT}")
             self.ws_loop.run_forever()
         except Exception as e:
-            print(f"[WebSocket] Server start failed: {e}")
+            logger.error(f"[WebSocket] Server start failed: {e}")
         finally:
             try:
                 pending = asyncio.all_tasks(self.ws_loop)
@@ -1906,7 +1910,7 @@ class WeighingApp(tk.Tk):
                     msg_info = payload.get("info")
                     qr_data = self.filter_qr(msg_info)
                     self.after(0, lambda data=qr_data: self.handle_incoming_qr(data))
-                    print(f"[WebSocket] QR: {qr_data}")
+                    logger.info(f"[WebSocket] QR: {qr_data}")
                     continue
 
                 elif msg_type != "weight":
@@ -1939,7 +1943,7 @@ class WeighingApp(tk.Tk):
                     )
                     continue
 
-                print(f"[WebSocket] Received weight: {raw_weight}")
+                logger.info(f"[WebSocket] Received weight: {raw_weight}")
                 self.after(0, lambda w=raw_weight: self.apply_received_weight(w))
                 await websocket.send(
                     json.dumps(
@@ -1947,7 +1951,7 @@ class WeighingApp(tk.Tk):
                     )
                 )
         except Exception as e:
-            print(f"[WebSocket] Client error: {e}")
+            logger.error(f"[WebSocket] Client error: {e}")
         finally:
             self.weight_ws_clients.discard(websocket)
             self.scanner_ws_clients.discard(websocket)
@@ -2098,6 +2102,34 @@ class WeighingApp(tk.Tk):
             self.qr_ws_clients.discard(client)
             self.ws_clients.discard(client)
 
+    def send_scanner_shutdown(self):
+        """Sends SHUTDOWN to connected scanner clients before GUI shutdown."""
+        if not self.ws_loop:
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._send_scanner_shutdown(), self.ws_loop)
+            fut.result(timeout=1.5)
+        except Exception:
+            pass
+
+    async def _send_scanner_shutdown(self):
+        """Async helper to request a graceful scanner shutdown."""
+        candidate_clients = list(self.scanner_ws_clients)
+        if not candidate_clients:
+            return
+        msg = json.dumps({"type": "SHUTDOWN"}, ensure_ascii=False)
+        stale = []
+        for client in candidate_clients:
+            try:
+                await client.send(msg)
+            except Exception:
+                stale.append(client)
+        for client in stale:
+            self.weight_ws_clients.discard(client)
+            self.scanner_ws_clients.discard(client)
+            self.qr_ws_clients.discard(client)
+            self.ws_clients.discard(client)
+
     def stop_websocket_server(self):
         """Stops the WebSocket server and closes all client connections."""
         if not self.ws_loop:
@@ -2131,6 +2163,7 @@ class WeighingApp(tk.Tk):
         except Exception:
             pass
         self.close_weight_popup()
+        self.send_scanner_shutdown()
         self.stop_websocket_server()
         self.destroy()
 
