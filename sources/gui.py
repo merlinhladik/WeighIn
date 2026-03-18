@@ -6,6 +6,7 @@ from tkinter import messagebox, filedialog
 import pandas as pd
 import json
 import os
+import sys
 import asyncio
 import threading
 from datetime import datetime
@@ -15,10 +16,9 @@ try:
     import keyboard
 except Exception:
     keyboard = None
-import logging
+from shared.logging_config import configure_logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = configure_logging("gui")
 
 
 PAID = "Zahlung erfolgt"

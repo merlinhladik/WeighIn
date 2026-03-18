@@ -11,11 +11,11 @@ import sys
 import tempfile
 import tkinter as tk
 from typing import Optional, Tuple
-from wsclient import WebSocketClient, QRClient, WebSocketDisconnected
+from shared.wsclient import WebSocketClient, QRClient, WebSocketDisconnected
+from shared.logging_config import configure_logging
 import keyboard
-import logging
 import websockets
-from list_available_cameras import list_available_cameras
+from shared.list_available_cameras import list_available_cameras
 try:
     import msvcrt
 except ImportError:
@@ -30,8 +30,7 @@ try:
 except Exception:
     cv2 = None
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = configure_logging("real_scanner")
 
 URL = "ws://localhost:8765"
 COOLDOWN_S = 1.0

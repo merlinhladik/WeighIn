@@ -38,7 +38,10 @@ def _elevated_command(binary_path):
 def _start_process(base, name, requires_root=False):
     binary_path = _binary_path(base, name)
     command = _elevated_command(binary_path) if requires_root else [binary_path]
-    popen_kwargs = {"cwd": base}
+
+    env = os.environ.copy()
+    env["DIST"] = base
+    popen_kwargs = {"cwd": base, "env": env}
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:

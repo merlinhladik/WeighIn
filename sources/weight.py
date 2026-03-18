@@ -3,16 +3,15 @@
 
 import cv2
 import numpy as np
-import logging
 import tkinter as tk
 import asyncio
 import time
 import websockets
-from wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
-from list_available_cameras import list_available_cameras
+from shared.wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
+from shared.list_available_cameras import list_available_cameras
+from shared.logging_config import configure_logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = configure_logging("weight")
 
 URL = "ws://localhost:8765"
 RECONNECT_DELAY_S = 2.0
