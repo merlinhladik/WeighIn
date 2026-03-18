@@ -12,10 +12,6 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import websockets
-try:
-    import keyboard
-except Exception:
-    keyboard = None
 from shared.logging_config import configure_logging
 
 logger = configure_logging("gui")
@@ -1124,18 +1120,15 @@ class WeighingApp(tk.Tk):
         self.send_weight_request()
 
     def trigger_qr_scan_hotkey(self, _event=None):
-        """Triggers scanner popup hotkey (F12) from GUI click."""
-        try:
-            logger.info("Triggering QR scan hotkey (F12)")
-            keyboard.press_and_release("F12")
-        except Exception as e:
-            messagebox.showerror("QR Scan", f"F12 konnte nicht ausgelost werden: {e}")
+        """Requests scanner popup open from GUI click."""
+        logger.info("Requesting QR scan popup from scanner client")
+        self.send_scanner_popup_request()
 
     def register_keyboard_shortcuts(self):
         """Registers GUI-wide keyboard shortcuts."""
         self.bind_all("<Control-s>", self.handle_save_shortcut)
         self.bind_all("<Control-S>", self.handle_save_shortcut)
-        self.bind_all("<Return>", self.handle_delete_shortcut)
+        self.bind_all("<Enter>", self.handle_enter)
 
     def _is_main_window_event(self, event) -> bool:
         """Returns true when event belongs to the main app window."""
@@ -1154,16 +1147,15 @@ class WeighingApp(tk.Tk):
         self.save()
         return "break"
 
-    def handle_delete_shortcut(self, event=None):
-        """Handles Enter: sends space and then backspace."""
+    def handle_enter(self, event=None):
+        """Handles Enter on main window and refreshes the Teilnehmer list."""
         if event is not None and not self._is_main_window_event(event):
             return
-        if keyboard is not None:
-            try:
-                keyboard.press_and_release("space")
-                keyboard.press_and_release("backspace")
-            except Exception:
-                pass
+        query = self.search_var.get() if hasattr(self, "search_var") else ""
+        if query.strip():
+            self.update_list(self.get_filtered_participants(query))
+        else:
+            self.update_list(self.participants)
         return "break"
 
     def accept_pending_weight(self):
@@ -1712,6 +1704,16 @@ class WeighingApp(tk.Tk):
             self.ws_loop,
         )
 
+    def send_scanner_popup_request(self):
+        """Asks scanner client to open QR scan popup."""
+        if not self.ws_loop:
+            messagebox.showwarning("QR Scan", "WebSocket server ist nicht gestartet.")
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._send_scanner_popup_request(),
+            self.ws_loop,
+        )
+
     def open_camera_target_dialog(self):
         """Opens a small dialog to choose the target device."""
         parent = self.settings_popup if self.settings_popup and self.settings_popup.winfo_exists() else self
@@ -1809,6 +1811,40 @@ class WeighingApp(tk.Tk):
             candidate_clients = candidate_clients[:1]
 
         msg = json.dumps({"type": "OPEN_CAMERA_SELECTION"}, ensure_ascii=False)
+        stale = []
+        for client in candidate_clients:
+            try:
+                await client.send(msg)
+            except Exception:
+                stale.append(client)
+
+        for client in stale:
+            self.weight_ws_clients.discard(client)
+            self.scanner_ws_clients.discard(client)
+            self.qr_ws_clients.discard(client)
+            self.ws_clients.discard(client)
+
+    async def _send_scanner_popup_request(self):
+        """Sends OPEN_SCAN_POPUP to one connected scanner client."""
+        candidate_clients = list(self.scanner_ws_clients)
+        if not candidate_clients:
+            self.after(
+                0,
+                lambda: messagebox.showwarning(
+                    "QR Scan",
+                    "Kein verbundener QR-Scanner gefunden.",
+                ),
+            )
+            return
+
+        if len(candidate_clients) > 1:
+            logger.info(
+                f"[WebSocket] Multiple scanner clients connected ({len(candidate_clients)}); "
+                "sending popup request to one client only."
+            )
+            candidate_clients = candidate_clients[:1]
+
+        msg = json.dumps({"type": "OPEN_SCAN_POPUP"}, ensure_ascii=False)
         stale = []
         for client in candidate_clients:
             try:

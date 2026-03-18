@@ -125,7 +125,7 @@ def _stop_process(process):
 def main():
     base = os.path.dirname(sys.executable)
 
-    gui = _start_process(base, "gui", requires_root=not sys.platform.startswith("win"))
+    gui = _start_process(base, "gui", requires_root=False)
     weight = _start_process(base, "weight")
     scanner = _start_process(
         base, "real_scanner", requires_root=not sys.platform.startswith("win")
