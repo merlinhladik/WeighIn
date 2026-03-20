@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-import wsclient
+import shared.wsclient as wsclient
 
 
 def test_websocket_client_connect_send_recv_and_close(monkeypatch):

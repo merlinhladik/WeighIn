@@ -3,43 +3,188 @@
 
 import cv2
 import numpy as np
-import logging
 import tkinter as tk
 import asyncio
-from wsclient import WebSocketClient, WeightClient
+import time
+import websockets
+from shared.wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
+from shared.list_available_cameras import list_available_cameras
+from shared.logging_config import configure_logging
 
-try:
-    from pygrabber.dshow_graph import FilterGraph
-except Exception:
-    FilterGraph = None
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = configure_logging("weight")
 
 URL = "ws://localhost:8765"
+RECONNECT_DELAY_S = 2.0
 
 DECODE_W, DECODE_H = 80, 140
 MIN_DIGITS, MAX_DIGITS = 3, 5
 
 
-def list_available_cameras():
-    if FilterGraph is not None:
-        try:
-            graph = FilterGraph()
-            names = graph.get_input_devices()
-            return [(idx, str(name)) for idx, name in enumerate(names)]
-        except Exception as e:
-            logger.warning("Pygrabber camera list failed: %s", e)
+def _show_camera_in_use_dialog():
+    root = tk.Tk()
+    root.withdraw()
 
-    cameras = []
-    for idx in range(10):
-        cap = cv2.VideoCapture(idx)
-        try:
-            if cap.isOpened():
-                cameras.append((idx, f"Kamera {idx}"))
-        finally:
-            cap.release()
-    return cameras
+    popup = tk.Toplevel(root)
+    popup.title("Kamera")
+    popup.attributes("-topmost", True)
+    popup.resizable(False, False)
+    tk.Label(
+        popup,
+        text="Kamera wird bereits von einem anderen Programm verwendet",
+        wraplength=320,
+        justify="center",
+    ).pack(padx=20, pady=14)
+    tk.Button(popup, text="OK", width=10, command=popup.destroy).pack(pady=(0, 12))
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
+    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
+    popup.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    popup.focus_force()
+    popup.wait_window()
+
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
+def _camera_name_for_index(camera_index: int) -> str:
+    for idx, name in list_available_cameras():
+        if idx == camera_index:
+            return name
+    return f"Kamera {camera_index}"
+
+
+def _show_camera_probe_dialog():
+    root = tk.Tk()
+    root.withdraw()
+
+    popup = tk.Toplevel(root)
+    popup.title("Kamera")
+    popup.attributes("-topmost", True)
+    popup.resizable(False, False)
+    popup.protocol("WM_DELETE_WINDOW", lambda: None)
+    tk.Label(
+        popup,
+        text="Überprüfen der Kamera, bitte warten...",
+        padx=28,
+        pady=18,
+    ).pack()
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
+    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
+    popup.geometry(f"300x100+{max(x, 0)}+{max(y, 0)}")
+    popup.focus_force()
+    popup.grab_set()
+    popup.update()
+    return root, popup
+
+
+def _close_camera_probe_dialog(root, popup):
+    try:
+        popup.grab_release()
+    except Exception:
+        pass
+    try:
+        popup.destroy()
+    except tk.TclError:
+        pass
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
+def _show_camera_probe_success_dialog(camera_name: str):
+    root = tk.Tk()
+    root.withdraw()
+
+    popup = tk.Toplevel(root)
+    popup.title("Kamera")
+    popup.attributes("-topmost", True)
+    popup.resizable(False, False)
+    tk.Label(
+        popup,
+        text=f"{camera_name}\nerfolgreich eingesetzt für Waage",
+        wraplength=340,
+        justify="center",
+    ).pack(padx=20, pady=14)
+    tk.Button(popup, text="OK", width=10, command=popup.destroy).pack(pady=(0, 12))
+
+    popup.update_idletasks()
+    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
+    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
+    popup.geometry(f"400x100+{max(x, 0)}+{max(y, 0)}")
+    popup.focus_force()
+    popup.wait_window()
+
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
+def _camera_frame_looks_blocked(frame) -> bool:
+    if frame is None:
+        return True
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mean, stddev = cv2.meanStdDev(gray)
+    except Exception:
+        return True
+
+    brightness = float(mean[0][0])
+    contrast = float(stddev[0][0])
+    return brightness <= 3.0 or contrast <= 1.0
+
+
+def _probe_selected_camera(camera_index: int) -> bool:
+    probe_root, probe_popup = _show_camera_probe_dialog()
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        logger.warning("Camera index %s is not opened during probe", camera_index)
+        cap.release()
+        _close_camera_probe_dialog(probe_root, probe_popup)
+        return False
+
+    try:
+        time.sleep(0.3)
+        good_frames = 0
+        for _ in range(10):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            if _camera_frame_looks_blocked(frame):
+                continue
+            good_frames += 1
+            if good_frames >= 2:
+                return True
+
+        logger.warning(
+            "Camera index %s only returned %s good frames during probe",
+            camera_index,
+            good_frames,
+        )
+        return False
+    finally:
+        cap.release()
+        _close_camera_probe_dialog(probe_root, probe_popup)
+
+
+def _camera_capture_is_usable(cap, camera_index: int) -> bool:
+    for _ in range(5):
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        if _camera_frame_looks_blocked(frame):
+            logger.warning("Camera index %s returned blocked/dark frames", camera_index)
+            return False
+        return True
+
+    logger.warning("Camera index %s did not return readable frames", camera_index)
+    return False
 
 
 def select_camera_index() -> int:
@@ -55,7 +200,7 @@ def select_camera_index() -> int:
     result = {"index": None}
 
     popup = tk.Toplevel()
-    popup.title("Kamera auswählen")
+    popup.title("Kamera Für die Waage auswählen")
     popup.geometry(f"{popup_w}x{popup_h}")
     popup.resizable(False, False)
     popup.attributes("-topmost", True)
@@ -99,6 +244,18 @@ def select_camera_index() -> int:
     if result["index"] is None:
         raise RuntimeError("Kameraauswahl abgebrochen.")
     return result["index"]
+
+
+_select_camera_index_once = select_camera_index
+
+
+def select_camera_index() -> int:
+    while True:
+        camera_index = _select_camera_index_once()
+        if _probe_selected_camera(camera_index):
+            _show_camera_probe_success_dialog(_camera_name_for_index(camera_index))
+            return camera_index
+        _show_camera_in_use_dialog()
 
 def red_mask(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -392,17 +549,40 @@ def _show_detection_error_dialog(cap, initial_frame, last_boxes):
 
 
 async def main(cam_index: int = 0):
-    cap = cv2.VideoCapture(cam_index)
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-    cap.set(cv2.CAP_PROP_EXPOSURE, -10)
-    if not cap.isOpened():
-        raise RuntimeError("Webcam cannot be opened.")
+    def open_camera(camera_index: int):
+        opened_cap = cv2.VideoCapture(camera_index)
+        opened_cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        opened_cap.set(cv2.CAP_PROP_EXPOSURE, -10)
+        if not opened_cap.isOpened():
+            opened_cap.release()
+            raise RuntimeError("Webcam cannot be opened.")
+        if not _camera_capture_is_usable(opened_cap, camera_index):
+            opened_cap.release()
+            raise RuntimeError("Camera is already in use.")
+        return opened_cap
+
+    while True:
+        try:
+            cap = open_camera(cam_index)
+            break
+        except RuntimeError as exc:
+            logger.warning("Opening selected camera failed: %s", exc)
+            _show_camera_in_use_dialog()
+            cam_index = select_camera_index()
 
     last_boxes = None
 
     ws = WebSocketClient(URL)
-    await ws.connect()
-    logger.info("WS connected: %s", URL)
+
+    async def connect_with_retry():
+        while True:
+            try:
+                await ws.connect()
+                logger.info("WS connected: %s", URL)
+                return
+            except (OSError, websockets.WebSocketException) as exc:
+                logger.warning("WS connect failed, retry in %.1fs: %s", RECONNECT_DELAY_S, exc)
+                await asyncio.sleep(RECONNECT_DELAY_S)
 
     def weight_provider():
         nonlocal last_boxes
@@ -417,6 +597,8 @@ async def main(cam_index: int = 0):
     weight_client = WeightClient(ws, weight_provider)
 
     try:
+        await connect_with_retry()
+        await weight_client.register()
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -426,8 +608,37 @@ async def main(cam_index: int = 0):
                 msg = await asyncio.wait_for(ws.recv_json(), timeout=0.01)
             except asyncio.TimeoutError:
                 continue
+            except WebSocketDisconnected as exc:
+                logger.warning("WS recv failed, reconnecting: %s", exc)
+                await connect_with_retry()
+                await weight_client.register()
+                continue
 
-            await weight_client.handle_message(msg)
+            if msg.get("type") == "OPEN_CAMERA_SELECTION":
+                try:
+                    selected_camera = select_camera_index()
+                except RuntimeError:
+                    continue
+
+                try:
+                    new_cap = open_camera(selected_camera)
+                except RuntimeError as exc:
+                    logger.warning("Opening selected camera failed: %s", exc)
+                    _show_camera_in_use_dialog()
+                    continue
+
+                cap.release()
+                cap = new_cap
+                cam_index = selected_camera
+                last_boxes = None
+                continue
+
+            try:
+                await weight_client.handle_message(msg)
+            except WebSocketDisconnected as exc:
+                logger.warning("WS send failed, reconnecting: %s", exc)
+                await connect_with_retry()
+                await weight_client.register()
 
     finally:
         await ws.close()
