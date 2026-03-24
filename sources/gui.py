@@ -6,19 +6,15 @@ from tkinter import messagebox, filedialog
 import pandas as pd
 import json
 import os
+import sys
 import asyncio
 import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import websockets
-try:
-    import keyboard
-except Exception:
-    keyboard = None
-import logging
+from shared.logging_config import configure_logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = configure_logging("gui")
 
 
 PAID = "Zahlung erfolgt"
@@ -112,36 +108,14 @@ class WeighingApp(tk.Tk):
              
         btn_container = tk.Frame(parent, bg=THEME["bg"])
         btn_container.pack(side=pack_side, fill=tk.X, pady=(20, 30))
+        right_actions = tk.Frame(btn_container, bg=THEME["bg"])
+        right_actions.pack(side=tk.RIGHT)
 
         btn_opts = {
-            "bg": THEME["input_bg"], "fg": "#f0f0f2", 
-            "font": ("Rubik", 10, "bold"), "bd": 1, 
+            "bg": THEME["input_bg"], "fg": "#f0f0f2",
+            "font": ("Rubik", 10, "bold"), "bd": 1,
             "relief": "flat", "height": 2, "cursor": "hand2"
         }
-        
-        self.btn_save = tk.Button(btn_container, text="Speichern", command=self.save, width=18, **btn_opts)
-        self.btn_save.pack(side=tk.LEFT, padx=5)
-
-        tk.Button(btn_container, text="Gewicht nehmen", command=self.read_scale, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
-
-        tk.Button(btn_container, text="Einstellungen", command=self.open_settings_window, width=18, **btn_opts).pack(side=tk.LEFT, padx=5)
-        double_start_btn_opts = dict(btn_opts)
-        double_start_btn_opts.update(
-            {
-                "bg": "#FFD54A",
-                "fg": "black",
-                "activebackground": "#FFD54A",
-                "activeforeground": "black",
-            }
-        )
-        self.btn_double_start = tk.Button(
-            btn_container,
-            text="Doppelstart",
-            command=self.open_double_start_window,
-            width=18,
-            **double_start_btn_opts,
-        )
-        self.btn_double_start.pack(side=tk.LEFT, padx=5)
 
         add_btn_opts = dict(btn_opts)
         add_btn_opts.update(
@@ -154,7 +128,7 @@ class WeighingApp(tk.Tk):
         )
 
         self.btn_add = tk.Button(
-            btn_container,
+            right_actions,
             text="Neuer Teilnehmer",
             command=self.open_add_participant_window,
             width=18,
@@ -162,23 +136,14 @@ class WeighingApp(tk.Tk):
         )
         self.btn_add.pack(side=tk.RIGHT, padx=5)
 
-        delete_btn_opts = dict(btn_opts)
-        delete_btn_opts.update(
-            {
-                "bg": THEME["error"],
-                "fg": "#f0f0f2",
-                "activebackground": THEME["error"],
-                "activeforeground": "#f0f0f2",
-            }
-        )
-        self.btn_delete = tk.Button(
-            btn_container,
-            text="Teilnehmer löschen",
-            command=getattr(self, "delete_selected_participant", lambda: None),
+        self.btn_settings = tk.Button(
+            right_actions,
+            text="Einstellungen",
+            command=self.open_settings_window,
             width=18,
-            **delete_btn_opts,
+            **btn_opts,
         )
-        self.btn_delete.pack(side=tk.RIGHT, padx=5)
+        self.btn_settings.pack(side=tk.RIGHT, padx=5)
 
         self.duplicate_warning_frame = tk.Frame(
             self.main_container,
@@ -249,6 +214,7 @@ class WeighingApp(tk.Tk):
             font=("Rubik", 12, "bold"),
             width=max(FIELD_WIDTH - 1, 1),
             anchor="w",
+            pady=7,
         )
         dropdown["menu"].config(
             bg=THEME["input_bg"],
@@ -729,6 +695,9 @@ class WeighingApp(tk.Tk):
         """Clears participant detail inputs in the main view."""
         self.selected_participant = None
         self.saved_form_snapshot = None
+        if hasattr(self, "listbox"):
+            self.listbox.selection_clear(0, tk.END)
+            self.refresh_listbox_item_styles()
         self.val_prename.delete(0, tk.END)
         self.val_surname.delete(0, tk.END)
         self.val_birthyear.delete(0, tk.END)
@@ -747,10 +716,25 @@ class WeighingApp(tk.Tk):
     def filter_list(self, *args):
         """Filters the participant list based on the search bar input."""
         query = self.search_var.get()
+        if query == self.search_placeholder:
+            query = ""
         if query.strip():
             self.clear_participant_details()
         filtered = self.get_filtered_participants(query)
         self.update_list(filtered)
+
+    def on_search_focus_in(self, event):
+        """Clears placeholder text when the search input receives focus."""
+        if self.search_var.get() == self.search_placeholder:
+            self.search_var.set("")
+            self.search_entry.configure(fg=THEME["input_fg"])
+
+    def on_search_focus_out(self, event):
+        """Restores placeholder text when the search input is empty."""
+        if not self.search_var.get().strip():
+            self.search_entry.configure(fg="#9a9a9a")
+            self.search_entry.delete(0, tk.END)
+            self.search_var.set(self.search_placeholder)
 
     def update_list(self, data: List[Dict]):
         """Refreshes the sidebar listbox with the provided data."""
@@ -758,10 +742,57 @@ class WeighingApp(tk.Tk):
         self.listbox.delete(0, tk.END)
         if not self.visible_participants:
             self.listbox.insert(tk.END, "kein Teilnehmer gefunden")
+            self.hovered_list_index = None
+            self.refresh_listbox_item_styles()
             return
         for p in self.visible_participants:
             name = p.get('Name', 'Unknown')
             self.listbox.insert(tk.END, f"  {name}")
+
+        max_index = len(self.visible_participants) - 1
+        if getattr(self, "hovered_list_index", None) is not None and self.hovered_list_index > max_index:
+            self.hovered_list_index = None
+
+        if self.selected_participant in self.visible_participants:
+            selected_index = self.visible_participants.index(self.selected_participant)
+            self.listbox.selection_set(selected_index)
+            self.listbox.activate(selected_index)
+            self.listbox.see(selected_index)
+        self.refresh_listbox_item_styles()
+
+    def refresh_listbox_item_styles(self):
+        """Applies visual states for default, hover and selected list items."""
+        if not hasattr(self, "listbox"):
+            return
+        selected_indices = set(self.listbox.curselection())
+        hovered_index = getattr(self, "hovered_list_index", None)
+        item_count = self.listbox.size()
+        for i in range(item_count):
+            bg = THEME["input_bg"]
+            fg = THEME["input_fg"]
+            if i in selected_indices:
+                bg = "#ffffff"
+                fg = "#000000"
+            elif hovered_index is not None and i == hovered_index and i < len(self.visible_participants):
+                bg = THEME["accent"]
+            self.listbox.itemconfig(i, bg=bg, fg=fg)
+
+    def on_listbox_motion(self, event):
+        """Highlights list item under cursor without changing selection."""
+        if not self.visible_participants:
+            return
+        hovered = self.listbox.nearest(event.y)
+        if hovered < 0 or hovered >= len(self.visible_participants):
+            hovered = None
+        if hovered != getattr(self, "hovered_list_index", None):
+            self.hovered_list_index = hovered
+            self.refresh_listbox_item_styles()
+
+    def on_listbox_leave(self, event):
+        """Clears hover state when cursor leaves the listbox."""
+        if getattr(self, "hovered_list_index", None) is not None:
+            self.hovered_list_index = None
+            self.refresh_listbox_item_styles()
 
     def on_select(self, event):
         """Handles selection of a participant from the listbox."""
@@ -776,6 +807,7 @@ class WeighingApp(tk.Tk):
         selected = self.visible_participants[index]
         self.selected_participant = selected
         self.show_details(selected)
+        self.refresh_listbox_item_styles()
 
     def load_data(self):
         """Loads participant data from the Excel file."""
@@ -1124,18 +1156,15 @@ class WeighingApp(tk.Tk):
         self.send_weight_request()
 
     def trigger_qr_scan_hotkey(self, _event=None):
-        """Triggers scanner popup hotkey (F12) from GUI click."""
-        try:
-            logger.info("Triggering QR scan hotkey (F12)")
-            keyboard.press_and_release("F12")
-        except Exception as e:
-            messagebox.showerror("QR Scan", f"F12 konnte nicht ausgelost werden: {e}")
+        """Requests scanner popup open from GUI click."""
+        logger.info("Requesting QR scan popup from scanner client")
+        self.send_scanner_popup_request()
 
     def register_keyboard_shortcuts(self):
         """Registers GUI-wide keyboard shortcuts."""
         self.bind_all("<Control-s>", self.handle_save_shortcut)
         self.bind_all("<Control-S>", self.handle_save_shortcut)
-        self.bind_all("<Return>", self.handle_delete_shortcut)
+        self.search_entry.bind("<Return>", self.handle_enter)
 
     def _is_main_window_event(self, event) -> bool:
         """Returns true when event belongs to the main app window."""
@@ -1154,16 +1183,15 @@ class WeighingApp(tk.Tk):
         self.save()
         return "break"
 
-    def handle_delete_shortcut(self, event=None):
-        """Handles Enter: sends space and then backspace."""
+    def handle_enter(self, event=None):
+        """Handles Enter on main window and refreshes the Teilnehmer list."""
         if event is not None and not self._is_main_window_event(event):
             return
-        if keyboard is not None:
-            try:
-                keyboard.press_and_release("space")
-                keyboard.press_and_release("backspace")
-            except Exception:
-                pass
+        query = self.search_var.get() if hasattr(self, "search_var") else ""
+        if query.strip():
+            self.update_list(self.get_filtered_participants(query))
+        else:
+            self.update_list(self.participants)
         return "break"
 
     def accept_pending_weight(self):
@@ -1712,6 +1740,16 @@ class WeighingApp(tk.Tk):
             self.ws_loop,
         )
 
+    def send_scanner_popup_request(self):
+        """Asks scanner client to open QR scan popup."""
+        if not self.ws_loop:
+            messagebox.showwarning("QR Scan", "WebSocket server ist nicht gestartet.")
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._send_scanner_popup_request(),
+            self.ws_loop,
+        )
+
     def open_camera_target_dialog(self):
         """Opens a small dialog to choose the target device."""
         parent = self.settings_popup if self.settings_popup and self.settings_popup.winfo_exists() else self
@@ -1809,6 +1847,40 @@ class WeighingApp(tk.Tk):
             candidate_clients = candidate_clients[:1]
 
         msg = json.dumps({"type": "OPEN_CAMERA_SELECTION"}, ensure_ascii=False)
+        stale = []
+        for client in candidate_clients:
+            try:
+                await client.send(msg)
+            except Exception:
+                stale.append(client)
+
+        for client in stale:
+            self.weight_ws_clients.discard(client)
+            self.scanner_ws_clients.discard(client)
+            self.qr_ws_clients.discard(client)
+            self.ws_clients.discard(client)
+
+    async def _send_scanner_popup_request(self):
+        """Sends OPEN_SCAN_POPUP to one connected scanner client."""
+        candidate_clients = list(self.scanner_ws_clients)
+        if not candidate_clients:
+            self.after(
+                0,
+                lambda: messagebox.showwarning(
+                    "QR Scan",
+                    "Kein verbundener QR-Scanner gefunden.",
+                ),
+            )
+            return
+
+        if len(candidate_clients) > 1:
+            logger.info(
+                f"[WebSocket] Multiple scanner clients connected ({len(candidate_clients)}); "
+                "sending popup request to one client only."
+            )
+            candidate_clients = candidate_clients[:1]
+
+        msg = json.dumps({"type": "OPEN_SCAN_POPUP"}, ensure_ascii=False)
         stale = []
         for client in candidate_clients:
             try:
@@ -2178,11 +2250,15 @@ class WeighingApp(tk.Tk):
 
 
         # Search Input
+        self.search_placeholder = "Teilnehmer suchen"
         self.search_var = tk.StringVar()
         self.search_var.trace("w", self.filter_list)
-        search_entry = tk.Entry(sidebar, textvariable=self.search_var, bg=THEME["input_bg"], 
-                                fg=THEME["input_fg"], insertbackground="#f0f0f2", font=("Rubik", 12))
-        search_entry.pack(fill=tk.X, padx=10, pady=(18, 20), ipady=6)
+        self.search_entry = tk.Entry(sidebar, textvariable=self.search_var, bg=THEME["input_bg"], 
+                                     fg=THEME["input_fg"], insertbackground="#f0f0f2", font=("Rubik", 12))
+        self.search_entry.pack(fill=tk.X, padx=10, pady=(18, 20), ipady=6)
+        self.search_entry.bind("<FocusIn>", self.on_search_focus_in)
+        self.search_entry.bind("<FocusOut>", self.on_search_focus_out)
+        self.on_search_focus_out(None)
 
 
         # Participant Listbox 
@@ -2193,13 +2269,18 @@ class WeighingApp(tk.Tk):
         entry_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         self.listbox = tk.Listbox(list_frame, bg=THEME["input_bg"], fg=THEME["input_fg"], 
-                                  font=("Rubik", 14), selectbackground=THEME["accent"],
+                                  font=("Rubik", 14), selectbackground="#ffffff",
+                                  selectforeground="#000000",
                                   yscrollcommand=entry_scrollbar.set, borderwidth=0,
-                                  selectborderwidth=2)
+                                  selectborderwidth=2, exportselection=False,
+                                  activestyle="none")
+        self.hovered_list_index = None
         self.listbox.pack(fill=tk.BOTH, expand=True, padx=(6, 2), pady=12)
         entry_scrollbar.config(command=self.listbox.yview)
         
         self.listbox.bind("<<ListboxSelect>>", self.on_select)
+        self.listbox.bind("<Motion>", self.on_listbox_motion)
+        self.listbox.bind("<Leave>", self.on_listbox_leave)
 
         # --- Main Content (Right Panel) ---
         self.main_container = tk.Frame(self, bg=THEME["bg"])
@@ -2327,20 +2408,85 @@ class WeighingApp(tk.Tk):
         self.double_start_status_label.grid(row=9, column=0, columnspan=2, padx=14, pady=(16, 6), sticky="n")
 
         box_frame.rowconfigure(10, weight=1)
-        hint_frame = tk.Frame(box_frame, bg=THEME["accent"], bd=0)
-        hint_frame.grid(row=10, column=0, columnspan=2, padx=14, pady=(8, 18), sticky="sew")
-        scan_hint_label = tk.Label(
-            hint_frame,
-            text="Drücke F12 oder hier um den QR Code zu scannen",
-            bg=THEME["accent"],
-            fg="black",
-            font=("Rubik", 11, "bold"),
-            padx=10,
-            pady=8,
-            cursor="hand2",
+        action_row = tk.Frame(box_frame, bg=THEME["bg"])
+        action_row.grid(row=10, column=0, columnspan=2, padx=14, pady=(0, 20), sticky="sew")
+        action_row.grid_columnconfigure(0, weight=1)
+        action_row.grid_columnconfigure(1, weight=1)
+
+        left_actions = tk.Frame(action_row, bg=THEME["bg"])
+        left_actions.grid(row=0, column=0, sticky="w")
+        right_actions = tk.Frame(action_row, bg=THEME["bg"])
+        right_actions.grid(row=0, column=1, sticky="e")
+
+        btn_opts = {
+            "bg": THEME["input_bg"],
+            "fg": "#f0f0f2",
+            "font": ("Rubik", 10, "bold"),
+            "bd": 1,
+            "relief": "flat",
+            "height": 2,
+            "cursor": "hand2",
+            "width": 18,
+        }
+
+        self.btn_qr_scan = tk.Button(
+            left_actions,
+            text="QR Scannen (F12)",
+            command=self.trigger_qr_scan_hotkey,
+            **btn_opts,
         )
-        scan_hint_label.pack(fill=tk.X)
-        scan_hint_label.bind("<Button-1>", self.trigger_qr_scan_hotkey)
+        self.btn_qr_scan.pack(side=tk.LEFT, padx=5)
+
+        double_start_btn_opts = dict(btn_opts)
+        double_start_btn_opts.update(
+            {
+                "bg": "#FFD54A",
+                "fg": "black",
+                "activebackground": "#FFD54A",
+                "activeforeground": "black",
+            }
+        )
+        self.btn_weight = tk.Button(
+            left_actions,
+            text="Gewicht nehmen",
+            command=self.read_scale,
+            **btn_opts,
+        )
+        self.btn_weight.pack(side=tk.LEFT, padx=5)
+
+        self.btn_save = tk.Button(
+            left_actions,
+            text="Speichern",
+            command=self.save,
+            **btn_opts,
+        )
+        self.btn_save.pack(side=tk.LEFT, padx=5)
+
+        self.btn_double_start = tk.Button(
+            left_actions,
+            text="Doppelstart",
+            command=self.open_double_start_window,
+            **double_start_btn_opts,
+        )
+        self.btn_double_start.pack(side=tk.LEFT, padx=5)
+
+        delete_btn_opts = dict(btn_opts)
+        delete_btn_opts.update(
+            {
+                "bg": THEME["error"],
+                "fg": "#f0f0f2",
+                "activebackground": THEME["error"],
+                "activeforeground": "#f0f0f2",
+            }
+        )
+        self.btn_delete = tk.Button(
+            right_actions,
+            text="Teilnehmer löschen",
+            command=getattr(self, "delete_selected_participant", lambda: None),
+            **delete_btn_opts,
+        )
+        self.btn_delete.pack(side=tk.RIGHT, padx=5)
+
         self.update_double_start_visibility()
         for entry_widget in [self.val_prename, self.val_surname, self.weight_var, self.val_club, self.val_birthyear]:
             entry_widget.bind("<KeyRelease>", self.update_save_button_state, add="+")
@@ -2349,3 +2495,5 @@ class WeighingApp(tk.Tk):
 if __name__ == "__main__":
     app = WeighingApp()
     app.mainloop()
+
+

@@ -4,7 +4,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import time
 
 
 SOFT_STOP_TIMEOUT_S = 5.0
@@ -21,6 +20,21 @@ def _binary_path(base, name):
     return os.path.join(base, _binary_name(name))
 
 
+def _linux_display_env():
+    env = {}
+    for key in (
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
+
+
 def _elevated_command(binary_path):
     if sys.platform == "darwin":
         quoted_path = shlex.quote(binary_path)
@@ -28,9 +42,14 @@ def _elevated_command(binary_path):
         return ["osascript", "-e", script]
 
     if sys.platform.startswith("linux"):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return [binary_path]
+        if shutil.which("sudo"):
+            # Keep DISPLAY/XAUTHORITY and session vars for GUI apps.
+            return ["sudo", "-E", "-S", binary_path]
         if shutil.which("pkexec"):
             return ["pkexec", binary_path]
-        return ["sudo", binary_path]
+        return [binary_path]
 
     return [binary_path]
 
@@ -38,7 +57,12 @@ def _elevated_command(binary_path):
 def _start_process(base, name, requires_root=False):
     binary_path = _binary_path(base, name)
     command = _elevated_command(binary_path) if requires_root else [binary_path]
-    popen_kwargs = {"cwd": base}
+
+    env = os.environ.copy()
+    if sys.platform.startswith("linux"):
+        env.update(_linux_display_env())
+
+    popen_kwargs = {"cwd": base, "env": env}
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
@@ -100,7 +124,7 @@ def _stop_process(process):
 def main():
     base = os.path.dirname(sys.executable)
 
-    gui = _start_process(base, "gui", requires_root=not sys.platform.startswith("win"))
+    gui = _start_process(base, "gui", requires_root=False)
     weight = _start_process(base, "weight")
     scanner = _start_process(
         base, "real_scanner", requires_root=not sys.platform.startswith("win")
