@@ -5,10 +5,7 @@ pandas
 keyboard
 
 # For camera access
-pygrabber (windows)
-v4l-utils (linux)
-system_profiler (macOS)
-
+pygrabber; platform_system = "Windows"
 
 # For packaging the application
 pyinstaller
