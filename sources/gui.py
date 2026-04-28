@@ -22,6 +22,33 @@ except ImportError:  # Pillow ist eine optionale Anzeige-Abhaengigkeit
     Image = None
     ImageTk = None
 
+
+def _base64url_decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
+
+
+def parse_dokume_qr(scanned: str) -> dict:
+    """Parse a Dokumetra-Pass QR/JWT-string. Mirrors real_scanner.parse_dokume_qr,
+    inline gehalten damit gui.py keine Subprocess-Importe braucht."""
+    payload_b64 = scanned.strip().split(".", 1)[0]
+    payload = json.loads(_base64url_decode(payload_b64))
+
+    fn = payload.get("FN")
+    ln = payload.get("LN")
+    dob = payload.get("DOB")
+    exp = payload.get("exp")
+    if not fn or not ln or dob is None or exp is None:
+        raise ValueError("missing fields")
+
+    return {
+        "first_name": fn,
+        "last_name": ln,
+        "name": f"{ln} {fn}".strip(),
+        "birth_year": int(str(dob).split("-")[0]),
+        "exp_timestamp": int(exp),
+    }
+
 logger = configure_logging("gui")
 
 
@@ -598,6 +625,83 @@ class WeighingApp(tk.Tk):
             bg = THEME["error"]
         self.scanner_status_label.config(text=text, bg=bg, fg="#ffffff")
 
+    # ------------------------------------------------------------------
+    # Scanner-Modus (Kamera vs. Hardware-USB-Scanner)
+    # ------------------------------------------------------------------
+    def _apply_scanner_mode_ui(self):
+        """Packt scanner_camera_label oder scanner_hardware_button je nach Modus.
+        Status-Banner bleibt in beiden Modi unten sichtbar."""
+        if not hasattr(self, "scanner_cell"):
+            return
+        # Vorhandene Inhalte ausblenden
+        self.scanner_camera_label.pack_forget()
+        self.scanner_hardware_button.pack_forget()
+        self.scanner_status_label.pack_forget()
+
+        if getattr(self, "scanner_mode", "camera") == "hardware":
+            self.scanner_hardware_button.pack(fill="both", expand=True)
+        else:
+            self.scanner_camera_label.pack(fill="both", expand=True)
+        self.scanner_status_label.pack(fill="x", pady=(4, 0))
+
+    def open_hardware_scan_input(self):
+        """Modal mit Entry, in das der USB-Scanner den QR-String tippt.
+        Auf Enter wird der String geparst und wie ein Kamera-Scan dispatcht."""
+        popup = tk.Toplevel(self)
+        popup.title("Pass scannen")
+        popup.configure(bg=THEME["bg"])
+        popup.resizable(False, False)
+        popup.transient(self)
+        popup.grab_set()
+
+        frame = tk.Frame(popup, bg=THEME["bg"], padx=20, pady=18)
+        frame.pack()
+
+        tk.Label(
+            frame,
+            text="Bitte den QR-Code mit dem Scanner einlesen.",
+            bg=THEME["bg"],
+            fg=THEME["fg"],
+            font=("Rubik", 12),
+        ).pack(pady=(0, 10))
+
+        entry = tk.Entry(frame, font=("Rubik", 12), width=50,
+                         bg=THEME["input_bg"], fg=THEME["input_fg"])
+        entry.pack()
+        entry.focus_set()
+
+        def submit(_event=None):
+            scanned = entry.get().strip()
+            popup.destroy()
+            if not scanned:
+                return
+            try:
+                info = parse_dokume_qr(scanned)
+            except Exception as exc:
+                logger.warning("Hardware-Scan: konnte QR nicht parsen: %s", exc)
+                self.set_scanner_status({"first_name": "?", "last_name": ""}, False)
+                return
+            self.handle_incoming_qr(info)
+
+        entry.bind("<Return>", submit)
+        popup.bind("<Escape>", lambda _e: popup.destroy())
+
+        popup.update_idletasks()
+        try:
+            x = self.winfo_rootx() + (self.winfo_width() - popup.winfo_width()) // 2
+            y = self.winfo_rooty() + (self.winfo_height() - popup.winfo_height()) // 3
+            popup.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        except Exception:
+            pass
+
+    def _handle_qr_scan_request(self, _event=None):
+        """F12-Dispatcher: im Hardware-Modus oeffnet das Input-Modal,
+        sonst sendet OPEN_SCAN_POPUP an den real_scanner-Subprocess."""
+        if getattr(self, "scanner_mode", "camera") == "hardware":
+            self.open_hardware_scan_input()
+        else:
+            self.trigger_qr_scan_hotkey()
+
     def search_participants(self, query: str) -> list[dict]:
         q = (query or "").lower().strip()
         if not q:
@@ -820,6 +924,9 @@ class WeighingApp(tk.Tk):
         self.max_age_years = DEFAULT_MAX_AGE_YEARS
         self.double_start_mode = "standard"
         self.double_start_years = []
+        # "camera" = Live-Stream vom real_scanner-Subprocess,
+        # "hardware" = USB-QR-Scanner der wie eine Tastatur eintippt.
+        self.scanner_mode = "camera"
 
     def load_event_settings(self):
         """Loads age range and tolerance config from setting.json near selected data source."""
@@ -1145,6 +1252,7 @@ class WeighingApp(tk.Tk):
         """Registers GUI-wide keyboard shortcuts."""
         self.bind_all("<Control-s>", self.handle_save_shortcut)
         self.bind_all("<Control-S>", self.handle_save_shortcut)
+        self.bind_all("<F12>", self._handle_qr_scan_request)
         self.search_entry.bind("<Return>", self.handle_enter)
 
     def _is_main_window_event(self, event) -> bool:
@@ -1532,7 +1640,7 @@ class WeighingApp(tk.Tk):
             return
 
         popup_w = 520
-        popup_h = 360
+        popup_h = 460
         popup = tk.Toplevel(self)
         self.settings_popup = popup
         popup.title("Einstellungen")
@@ -1645,6 +1753,22 @@ class WeighingApp(tk.Tk):
             width=20,
         ).pack(pady=(4, 12))
 
+        # Pass-Scanner-Eingabemodus: Kamera-Stream oder USB-Tastatur-Scanner
+        tk.Label(popup, text="Pass-Scanner-Eingabe", **lbl_style).pack(pady=(8, 4))
+        scanner_mode_label_to_value = {"Kamera": "camera", "Hardware-Scanner": "hardware"}
+        scanner_mode_value_to_label = {v: k for k, v in scanner_mode_label_to_value.items()}
+        scanner_mode_var = tk.StringVar(
+            value=scanner_mode_value_to_label.get(self.scanner_mode, "Kamera")
+        )
+        scanner_mode_combo = ttk.Combobox(
+            popup,
+            textvariable=scanner_mode_var,
+            values=list(scanner_mode_label_to_value.keys()),
+            state="readonly",
+            width=22,
+        )
+        scanner_mode_combo.pack(pady=(0, 12))
+
         def _on_settings_close():
             if popup == self.settings_popup:
                 self.settings_popup = None
@@ -1682,6 +1806,11 @@ class WeighingApp(tk.Tk):
                 return
 
             self.weight_decimal_places = selected_places
+
+            new_mode = scanner_mode_label_to_value.get(scanner_mode_var.get(), "camera")
+            if new_mode != self.scanner_mode:
+                self.scanner_mode = new_mode
+                self._apply_scanner_mode_ui()
 
             if self.pending_received_weight is not None and self.weight_popup is not None and self.weight_popup.winfo_exists():
                 self.show_weight_popup(self.pending_received_weight)
@@ -2485,10 +2614,10 @@ class WeighingApp(tk.Tk):
         )
         self._scale_camera_photo = None  # GC-Schutz fuer PhotoImage
 
-        scanner_cell = tk.Frame(box_frame, bg=THEME["bg"])
-        scanner_cell.grid(row=10, column=1, padx=(4, 14), pady=(8, 8), sticky="nsew")
+        self.scanner_cell = tk.Frame(box_frame, bg=THEME["bg"])
+        self.scanner_cell.grid(row=10, column=1, padx=(4, 14), pady=(8, 8), sticky="nsew")
         self.scanner_camera_label = tk.Label(
-            scanner_cell,
+            self.scanner_cell,
             bg=THEME["secondary"],
             text="Pass-Scanner: keine Kamera konfiguriert\n(WEIGHIN_SCANNER_CAMERA setzen)",
             fg="#9a9a9a",
@@ -2496,13 +2625,27 @@ class WeighingApp(tk.Tk):
             anchor="center",
             justify="center",
         )
-        self.scanner_camera_label.pack(fill="both", expand=True)
         self._scanner_camera_photo = None  # GC-Schutz
 
-        # Status-Banner unter dem Scanner-Bild: zeigt nach dem Scan
+        # Hardware-Scanner-Modus: grosser Button anstelle des Kamera-Bilds.
+        # Klick oder F12 oeffnet ein Eingabe-Modal, in das der USB-Scanner tippt.
+        self.scanner_hardware_button = tk.Button(
+            self.scanner_cell,
+            text="QR scannen (F12)",
+            command=self.open_hardware_scan_input,
+            bg=THEME["accent"],
+            fg="#ffffff",
+            activebackground=THEME["accent"],
+            activeforeground="#ffffff",
+            font=("Rubik", 16, "bold"),
+            relief="flat",
+            cursor="hand2",
+        )
+
+        # Status-Banner unter dem Scanner-Bereich: zeigt nach dem Scan
         # "Pass gültig / abgelaufen — Vorname Nachname".
         self.scanner_status_label = tk.Label(
-            scanner_cell,
+            self.scanner_cell,
             bg=THEME["secondary"],
             fg="#9a9a9a",
             text="",
@@ -2510,7 +2653,8 @@ class WeighingApp(tk.Tk):
             anchor="center",
             pady=6,
         )
-        self.scanner_status_label.pack(fill="x", pady=(4, 0))
+
+        self._apply_scanner_mode_ui()
 
         box_frame.rowconfigure(10, weight=1)
         action_row = tk.Frame(box_frame, bg=THEME["bg"])
