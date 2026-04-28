@@ -40,16 +40,16 @@ DEFAULT_MIN_AGE_YEARS = 6
 DEFAULT_MAX_AGE_YEARS = 120
 
 THEME = {
-    "bg": "#1e1e1e",        # VSCode Dark+ Background
-    "fg": "#f0f0f2",        # text
-    "accent": "#22AAF0",    # PO Palette: Fresh Sky
-    "secondary": "#252526", # VSCode Dark+ Sidebar/Secondary
-    "input_bg": "#3c3c3c",  # VSCode Dark+ Input Field
-    "input_fg": "#f0f0f2",  # text
-    "success": "#4CCD70",   # PO Palette: Emerald
-    "error": "#B7413F",     # Option 3: Earthy Brick Red
-    "männlich" : "#22AAF0", # PO Palette: Fresh Sky
-    "weiblich" : "#E590E8"  # PO Palette: Violet
+    "bg": "#ffffff",        # Light: white main background
+    "fg": "#1e1e1e",        # near-black text
+    "accent": "#1B7FBE",    # darker Fresh Sky for contrast on white
+    "secondary": "#e8eaed", # light grey for sidebar / Kamera-Platzhalter
+    "input_bg": "#f5f5f5",  # very light grey input field (subtle vs white bg)
+    "input_fg": "#1e1e1e",  # near-black input text
+    "success": "#2E7D32",   # forest green
+    "error": "#B7413F",     # Earthy Brick Red (kept)
+    "männlich": "#1B7FBE",  # matches accent
+    "weiblich": "#C36CD0",  # darker violet for legibility on light bg
 }
 
 
@@ -120,7 +120,7 @@ class WeighingApp(tk.Tk):
         right_actions.pack(side=tk.RIGHT)
 
         btn_opts = {
-            "bg": THEME["input_bg"], "fg": "#f0f0f2",
+            "bg": THEME["input_bg"], "fg": THEME["fg"],
             "font": ("Rubik", 10, "bold"), "bd": 1,
             "relief": "flat", "height": 2, "cursor": "hand2"
         }
@@ -128,9 +128,9 @@ class WeighingApp(tk.Tk):
         add_btn_opts = dict(btn_opts)
         add_btn_opts.update(
             {
-                "bg": "#f0f0f2",
+                "bg": THEME["fg"],
                 "fg": "black",
-                "activebackground": "#f0f0f2",
+                "activebackground": THEME["fg"],
                 "activeforeground": "black",
             }
         )
@@ -163,7 +163,7 @@ class WeighingApp(tk.Tk):
             self.duplicate_warning_frame,
             text="Achtung: Mehrere Personen gefunden",
             bg=THEME["error"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 14, "bold"),
             padx=20,
             pady=10,
@@ -176,9 +176,9 @@ class WeighingApp(tk.Tk):
             text="x",
             command=self.hide_duplicate_warning,
             bg=THEME["error"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             activebackground=THEME["error"],
-            activeforeground="#f0f0f2",
+            activeforeground=THEME["fg"],
             bd=0,
             relief="flat",
             font=("Rubik", 9, "bold"),
@@ -205,7 +205,7 @@ class WeighingApp(tk.Tk):
 
     def create_entry_value(self, parent, r, c):
         """Creates an editable entry field at the specified grid position."""
-        entry = tk.Entry(parent, bg=THEME["input_bg"], fg="#f0f0f2", font=("Rubik", 14), justify="left", width=FIELD_WIDTH)
+        entry = tk.Entry(parent, bg=THEME["input_bg"], fg=THEME["fg"], font=("Rubik", 14), justify="left", width=FIELD_WIDTH)
         entry.grid(row=r, column=c, padx=14, pady=(5, 14), ipady=4, sticky="n")
         return entry
 
@@ -327,9 +327,9 @@ class WeighingApp(tk.Tk):
         if hasattr(self, "btn_save"):
             self.btn_save.config(
                 bg=THEME["input_bg"],
-                fg="#f0f0f2",
+                fg=THEME["fg"],
                 activebackground=THEME["input_bg"],
-                activeforeground="#f0f0f2",
+                activeforeground=THEME["fg"],
             )
 
     def update_save_button_state(self, _event=None):
@@ -339,8 +339,8 @@ class WeighingApp(tk.Tk):
         if not self.selected_participant:
             if hasattr(self, "details_box_frame"):
                 self.details_box_frame.config(
-                    highlightbackground="#f0f0f2",
-                    highlightcolor="#f0f0f2",
+                    highlightbackground=THEME["fg"],
+                    highlightcolor=THEME["fg"],
                 )
             self.set_save_button_default_style()
             if hasattr(self, "save_state_hint_label"):
@@ -358,9 +358,9 @@ class WeighingApp(tk.Tk):
                 )
             self.btn_save.config(
                 bg=THEME["error"],
-                fg="#f0f0f2",
+                fg=THEME["fg"],
                 activebackground=THEME["error"],
-                activeforeground="#f0f0f2",
+                activeforeground=THEME["fg"],
             )
             if hasattr(self, "save_state_hint_label"):
                 self.save_state_hint_label.config(
@@ -390,8 +390,8 @@ class WeighingApp(tk.Tk):
 
         if hasattr(self, "details_box_frame"):
             self.details_box_frame.config(
-                highlightbackground="#f0f0f2",
-                highlightcolor="#f0f0f2",
+                highlightbackground=THEME["fg"],
+                highlightcolor=THEME["fg"],
             )
         self.set_save_button_default_style()
         if hasattr(self, "save_state_hint_label"):
@@ -751,10 +751,11 @@ class WeighingApp(tk.Tk):
             bg = THEME["input_bg"]
             fg = THEME["input_fg"]
             if i in selected_indices:
-                bg = "#ffffff"
-                fg = "#000000"
+                bg = THEME["accent"]
+                fg = "#ffffff"
             elif hovered_index is not None and i == hovered_index and i < len(self.visible_participants):
                 bg = THEME["accent"]
+                fg = "#ffffff"
             self.listbox.itemconfig(i, bg=bg, fg=fg)
 
     def on_listbox_motion(self, event):
@@ -1002,7 +1003,7 @@ class WeighingApp(tk.Tk):
             text="Cancel",
             command=popup.destroy,
             bg=THEME["error"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=6)
@@ -1058,10 +1059,10 @@ class WeighingApp(tk.Tk):
         self.tolerance_hint_value_label.config(text=f"{tolerance:g} g")
 
     def prompt_for_data_source_selection(self):
-        """Prompts user to choose a data source when app starts without one."""
+        """Beim Start ohne gesetzte Datenquelle direkt das Settings-Fenster
+        oeffnen (ohne vorgeschaltetes Hinweis-Popup)."""
         if self.data_file_path:
             return
-        messagebox.showinfo("Achtung", "Bitte Datenquelle auswählen.")
         self.open_settings_window()
 
     def format_scale_weight(self, raw_weight: int) -> str:
@@ -1292,9 +1293,9 @@ class WeighingApp(tk.Tk):
         lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Rubik", 11)}
         entry_style = {
             "bg": THEME["input_bg"],
-            "fg": "#f0f0f2",
+            "fg": THEME["fg"],
             "font": ("Rubik", 11),
-            "insertbackground": "#f0f0f2"
+            "insertbackground": THEME["fg"]
         }
 
         radio_style = {
@@ -1439,7 +1440,7 @@ class WeighingApp(tk.Tk):
             text="Abbrechen",
             command=popup.destroy,
             bg=THEME["error"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=8)
@@ -1629,7 +1630,7 @@ class WeighingApp(tk.Tk):
             text="Daten laden",
             command=choose_data_file,
             bg=THEME["input_bg"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 10, "bold"),
             width=20,
         ).pack(pady=(8, 20))
@@ -1639,7 +1640,7 @@ class WeighingApp(tk.Tk):
             text="Kamera auswählen",
             command=self.open_camera_target_dialog,
             bg=THEME["input_bg"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 10, "bold"),
             width=20,
         ).pack(pady=(4, 12))
@@ -1705,7 +1706,7 @@ class WeighingApp(tk.Tk):
             text="Abbrechen",
             command=_on_settings_close,
             bg=THEME["error"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=8)
@@ -1773,11 +1774,11 @@ class WeighingApp(tk.Tk):
 
         tk.Button(
             btn_row, text="Anwenden", command=apply_and_close,
-            bg=THEME["input_bg"], fg="#f0f0f2", font=("Rubik", 10, "bold"), width=12,
+            bg=THEME["input_bg"], fg=THEME["fg"], font=("Rubik", 10, "bold"), width=12,
         ).pack(side=tk.LEFT, padx=6)
         tk.Button(
             btn_row, text="Abbrechen", command=popup.destroy,
-            bg=THEME["input_bg"], fg="#f0f0f2", font=("Rubik", 10, "bold"), width=12,
+            bg=THEME["input_bg"], fg=THEME["fg"], font=("Rubik", 10, "bold"), width=12,
         ).pack(side=tk.LEFT, padx=6)
 
         popup.protocol("WM_DELETE_WINDOW", popup.destroy)
@@ -2187,7 +2188,7 @@ class WeighingApp(tk.Tk):
                 text="Cancel",
                 command=self.cancel_pending_weight,
                 bg=THEME["error"],
-                fg="#f0f0f2",
+                fg=THEME["fg"],
                 font=("Rubik", 10, "bold"),
                 width=10,
             ).pack(side=tk.LEFT, padx=8)
@@ -2313,7 +2314,7 @@ class WeighingApp(tk.Tk):
         self.search_var = tk.StringVar()
         self.search_var.trace("w", self.filter_list)
         self.search_entry = tk.Entry(sidebar, textvariable=self.search_var, bg=THEME["input_bg"], 
-                                     fg=THEME["input_fg"], insertbackground="#f0f0f2", font=("Rubik", 12))
+                                     fg=THEME["input_fg"], insertbackground=THEME["fg"], font=("Rubik", 12))
         self.search_entry.pack(fill=tk.X, padx=10, pady=(18, 20), ipady=6)
         self.search_entry.bind("<FocusIn>", self.on_search_focus_in)
         self.search_entry.bind("<FocusOut>", self.on_search_focus_out)
@@ -2327,9 +2328,9 @@ class WeighingApp(tk.Tk):
         entry_scrollbar = tk.Scrollbar(list_frame)
         entry_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.listbox = tk.Listbox(list_frame, bg=THEME["input_bg"], fg=THEME["input_fg"], 
-                                  font=("Rubik", 14), selectbackground="#ffffff",
-                                  selectforeground="#000000",
+        self.listbox = tk.Listbox(list_frame, bg=THEME["input_bg"], fg=THEME["input_fg"],
+                                  font=("Rubik", 14), selectbackground=THEME["accent"],
+                                  selectforeground="#ffffff",
                                   yscrollcommand=entry_scrollbar.set, borderwidth=0,
                                   selectborderwidth=2, exportselection=False,
                                   activestyle="none")
@@ -2354,8 +2355,8 @@ class WeighingApp(tk.Tk):
         box_frame = tk.Frame(
             container,
             bg=THEME["bg"],
-            highlightbackground="#f0f0f2",
-            highlightcolor="#f0f0f2",
+            highlightbackground=THEME["fg"],
+            highlightcolor=THEME["fg"],
             highlightthickness=2,
         )
         self.details_box_frame = box_frame
@@ -2364,7 +2365,7 @@ class WeighingApp(tk.Tk):
             box_frame,
             text="",
             bg=THEME["bg"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 11, "bold"),
             anchor="center",
             justify="center",
@@ -2398,7 +2399,7 @@ class WeighingApp(tk.Tk):
             tolerance_row,
             text="",
             bg=THEME["bg"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 12, "bold"),
             width=20,
             anchor="w",
@@ -2409,7 +2410,7 @@ class WeighingApp(tk.Tk):
             tolerance_row,
             text="",
             bg=THEME["bg"],
-            fg="#f0f0f2",
+            fg=THEME["fg"],
             font=("Rubik", 12, "bold"),
             anchor="w",
             justify="left",
@@ -2524,7 +2525,7 @@ class WeighingApp(tk.Tk):
 
         btn_opts = {
             "bg": THEME["input_bg"],
-            "fg": "#f0f0f2",
+            "fg": THEME["fg"],
             "font": ("Rubik", 10, "bold"),
             "bd": 1,
             "relief": "flat",
@@ -2578,9 +2579,9 @@ class WeighingApp(tk.Tk):
         delete_btn_opts.update(
             {
                 "bg": THEME["error"],
-                "fg": "#f0f0f2",
+                "fg": THEME["fg"],
                 "activebackground": THEME["error"],
-                "activeforeground": "#f0f0f2",
+                "activeforeground": THEME["fg"],
             }
         )
         self.btn_delete = tk.Button(
