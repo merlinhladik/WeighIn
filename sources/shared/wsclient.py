@@ -98,9 +98,14 @@ class WeightClient:
 
         weight_value = self.weight_provider()
         if weight_value is None:
+            # Feedback an die GUI, dass der Request bearbeitet wurde,
+            # die OCR aber nichts erkennen konnte.
+            await self.ws.send_json({
+                "type": "weight_failed",
+                "reason": "OCR konnte keine Ziffern erkennen",
+            })
             return
-        else:
-            await self.ws.send_json({"type": "weight", "weight": weight_value}) 
+        await self.ws.send_json({"type": "weight", "weight": weight_value})
 
 class QRClient:
     """Send data when a QR code is scanned"""

@@ -15,7 +15,7 @@ def list_available_cameras() -> CameraList:
 
     Windows -> uses pygrabber
     Linux   -> uses v4l2-ctl and filters duplicate video nodes
-    macOS   -> uses system_profiler
+    macOS   -> uses AVFoundation discovery session (with system_profiler fallback)
     """
 
     if sys.platform.startswith("win"):
@@ -90,6 +90,47 @@ def _list_linux_cameras() -> CameraList:
 # -----------------------------
 
 def _list_macos_cameras() -> CameraList:
+    """
+    Primary: AVFoundation Discovery Session.
+    Liefert Indizes, die mit `cv2.VideoCapture(idx)` uebereinstimmen, und
+    erkennt zusaetzlich Continuity Cameras und externe USB-Webcams.
+    Fallback: system_profiler, falls pyobjc-framework-AVFoundation fehlt.
+    """
+    try:
+        import AVFoundation  # type: ignore
+
+        device_types = [AVFoundation.AVCaptureDeviceTypeBuiltInWideAngleCamera]
+        for optional in (
+            "AVCaptureDeviceTypeExternalUnknown",
+            "AVCaptureDeviceTypeContinuityCamera",
+        ):
+            if hasattr(AVFoundation, optional):
+                device_types.append(getattr(AVFoundation, optional))
+
+        discovery = AVFoundation.AVCaptureDeviceDiscoverySession.discoverySessionWithDeviceTypes_mediaType_position_(
+            device_types,
+            AVFoundation.AVMediaTypeVideo,
+            AVFoundation.AVCaptureDevicePositionUnspecified,
+        )
+
+        cameras: CameraList = []
+        seen = set()
+        for i, dev in enumerate(discovery.devices()):
+            uid = dev.uniqueID()
+            if uid in seen:
+                continue
+            seen.add(uid)
+            cameras.append((i, str(dev.localizedName())))
+
+        if cameras:
+            return cameras
+    except Exception:
+        pass
+
+    return _list_macos_cameras_via_system_profiler()
+
+
+def _list_macos_cameras_via_system_profiler() -> CameraList:
     try:
         result = subprocess.run(
             ["system_profiler", "SPCameraDataType"],

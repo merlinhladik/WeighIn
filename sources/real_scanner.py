@@ -34,6 +34,14 @@ MODE_POPUP = "popup"
 MODE_CAMERA_SELECTION = "camera_selection"
 MODE_CAMERA = "camera"
 
+# Streaming-Modus (Mac/Headless): wenn WEIGHIN_SCANNER_CAMERA gesetzt ist,
+# wird die Kamera dauerhaft geoeffnet, der Feed an die GUI gestreamt und
+# QR-Codes laufend erkannt - ohne Tk-Popups.
+SCANNER_STREAM_FPS = 12.0
+SCANNER_STREAM_INTERVAL_S = 1.0 / SCANNER_STREAM_FPS
+SCANNER_FRAME_TARGET_WIDTH = 480
+SCANNER_FRAME_JPEG_QUALITY = 70
+
 
 def base64url_decode(data: str) -> bytes:
     padding = "=" * (-len(data) % 4)
@@ -317,13 +325,26 @@ class ScanPopup:
             return False
 
         try:
-            time.sleep(0.3)
+            # macOS-AVFoundation: laengere Aufwaermphase + Logging.
+            time.sleep(1.5)
             good_frames = 0
-            for _ in range(10):
+            for attempt in range(20):
                 ok, frame = cap.read()
                 if not ok or frame is None:
+                    time.sleep(0.1)
                     continue
-                if self._camera_frame_looks_blocked(frame):
+                blocked = self._camera_frame_looks_blocked(frame)
+                try:
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    mean, stddev = cv2.meanStdDev(gray)
+                    logger.info(
+                        "scan-probe cam=%s attempt=%s brightness=%.2f contrast=%.2f blocked=%s",
+                        camera_index, attempt, float(mean[0][0]), float(stddev[0][0]), blocked,
+                    )
+                except Exception:
+                    pass
+                if blocked:
+                    time.sleep(0.1)
                     continue
                 good_frames += 1
                 if good_frames >= 2:
@@ -804,6 +825,148 @@ async def main():
         await ws.close()
 
 
+async def _streaming_main(scanner_cam_index: int):
+    """
+    Dialog-freier Streaming-Modus: oeffnet die Kamera einmal, streamt Frames
+    via WS an die GUI (FRAME_SCANNER), erkennt QR-Codes laufend mit Cooldown.
+    Aktiv nur wenn WEIGHIN_SCANNER_CAMERA gesetzt ist.
+    """
+    if cv2 is None:
+        logger.error("cv2 nicht verfuegbar - Streaming-Modus unmoeglich")
+        return
+
+    # macOS-TCC-Race: erster Open kann False liefern bis die Permission durch ist.
+    cap = None
+    for attempt in range(6):
+        cap = cv2.VideoCapture(scanner_cam_index)
+        if cap.isOpened():
+            break
+        cap.release()
+        cap = None
+        logger.warning(
+            "Scanner-Kamera index=%s noch nicht offen (attempt %s/6) - TCC retry in 1.5s",
+            scanner_cam_index, attempt + 1,
+        )
+        await asyncio.sleep(1.5)
+    if cap is None:
+        logger.error(
+            "Scanner-Kamera index=%s konnte nach Retries nicht geoeffnet werden",
+            scanner_cam_index,
+        )
+        return
+    logger.info("Scanner-Kamera index=%s geoeffnet (Streaming-Modus)", scanner_cam_index)
+
+    detector = cv2.QRCodeDetector()
+    ws = WebSocketClient(URL)
+    qr_client = QRClient(ws)
+    last_emit_ts = 0.0
+    last_frame_send = 0.0
+
+    async def connect_with_retry():
+        while True:
+            try:
+                await ws.connect()
+                logger.info("WS connected: %s", URL)
+                return
+            except (OSError, websockets.WebSocketException) as exc:
+                logger.warning(
+                    "WS connect failed, retry in %.1fs: %s", RECONNECT_DELAY_S, exc
+                )
+                await asyncio.sleep(RECONNECT_DELAY_S)
+
+    try:
+        await connect_with_retry()
+        await qr_client.register()
+
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                logger.warning("Scanner-Kamera read fehlgeschlagen")
+                await asyncio.sleep(0.05)
+                continue
+
+            # Frame-Streaming an GUI
+            now_mono = time.monotonic()
+            if now_mono - last_frame_send >= SCANNER_STREAM_INTERVAL_S:
+                last_frame_send = now_mono
+                h, w = frame.shape[:2]
+                if w > SCANNER_FRAME_TARGET_WIDTH:
+                    s = SCANNER_FRAME_TARGET_WIDTH / w
+                    small = cv2.resize(frame, (SCANNER_FRAME_TARGET_WIDTH, int(h * s)))
+                else:
+                    small = frame
+                ok_enc, jpeg = cv2.imencode(
+                    ".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, SCANNER_FRAME_JPEG_QUALITY]
+                )
+                if ok_enc:
+                    try:
+                        await ws.send_json({
+                            "type": "FRAME_SCANNER",
+                            "data": base64.b64encode(jpeg.tobytes()).decode("ascii"),
+                        })
+                    except WebSocketDisconnected:
+                        await connect_with_retry()
+                        await qr_client.register()
+
+            # QR-Detection auf Originalframe
+            try:
+                text, points, _ = detector.detectAndDecode(frame)
+            except Exception:
+                text, points = "", None
+
+            if points is not None and text:
+                trimmed = ScanPopup._trim_camera_qr_text(text).strip()
+                if trimmed and time.time() - last_emit_ts > COOLDOWN_S:
+                    try:
+                        info = parse_dokume_qr(trimmed)
+                    except Exception:
+                        info = None
+                    if info is not None:
+                        last_emit_ts = time.time()
+                        try:
+                            await qr_client.send_qr(info)
+                            logger.info("Sent QR")
+                        except WebSocketDisconnected:
+                            await connect_with_retry()
+                            await qr_client.register()
+
+            # Eingehende Steuermsgs verarbeiten
+            try:
+                msg = await asyncio.wait_for(ws.recv_json(), timeout=0.01)
+            except asyncio.TimeoutError:
+                msg = None
+            except WebSocketDisconnected:
+                await connect_with_retry()
+                await qr_client.register()
+                msg = None
+            if msg:
+                msg_type = msg.get("type")
+                if msg_type == "SHUTDOWN":
+                    logger.info("Shutdown by GUI message")
+                    break
+                if msg_type == "SET_CAMERA":
+                    target_idx = msg.get("index")
+                    if isinstance(target_idx, int):
+                        logger.info("SET_CAMERA -> index=%s", target_idx)
+                        cap.release()
+                        new_cap = cv2.VideoCapture(target_idx)
+                        if new_cap.isOpened():
+                            cap = new_cap
+                            scanner_cam_index = target_idx
+                        else:
+                            new_cap.release()
+                            logger.warning(
+                                "SET_CAMERA failed for index %s, restoring previous %s",
+                                target_idx, scanner_cam_index,
+                            )
+                            cap = cv2.VideoCapture(scanner_cam_index)
+
+            await asyncio.sleep(0.005)
+    finally:
+        cap.release()
+        await ws.close()
+
+
 if __name__ == "__main__":
     logger.info(
         "[STARTUP] real_scanner boot pid=%s executable=%s argv=%s cwd=%s",
@@ -812,4 +975,17 @@ if __name__ == "__main__":
         sys.argv,
         os.getcwd(),
     )
+    scanner_env = os.environ.get("WEIGHIN_SCANNER_CAMERA", "").strip()
+    if scanner_env:
+        try:
+            scanner_idx = int(scanner_env)
+        except ValueError:
+            logger.warning(
+                "WEIGHIN_SCANNER_CAMERA=%r ist kein int, fallback auf Popup-Modus",
+                scanner_env,
+            )
+            scanner_idx = None
+        if scanner_idx is not None:
+            asyncio.run(_streaming_main(scanner_idx))
+            sys.exit(0)
     asyncio.run(main())

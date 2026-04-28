@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 TOP Team Combat Control
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import os
+import time
+import base64
 import cv2
 import numpy as np
-import tkinter as tk
 import asyncio
-import time
 import websockets
 from shared.wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
 from shared.list_available_cameras import list_available_cameras
@@ -19,243 +20,59 @@ RECONNECT_DELAY_S = 2.0
 DECODE_W, DECODE_H = 80, 140
 MIN_DIGITS, MAX_DIGITS = 3, 5
 
-
-def _show_camera_in_use_dialog():
-    root = tk.Tk()
-    root.withdraw()
-
-    popup = tk.Toplevel(root)
-    popup.title("Kamera")
-    popup.attributes("-topmost", True)
-    popup.resizable(False, False)
-    tk.Label(
-        popup,
-        text="Kamera wird bereits von einem anderen Programm verwendet",
-        wraplength=320,
-        justify="center",
-    ).pack(padx=20, pady=14)
-    tk.Button(popup, text="OK", width=10, command=popup.destroy).pack(pady=(0, 12))
-
-    popup.update_idletasks()
-    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
-    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
-    popup.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-    popup.focus_force()
-    popup.wait_window()
-
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
+# Frame-Streaming an die GUI: gedrosselt + JPEG-base64 ueber WS.
+FRAME_FPS = 12.0
+FRAME_INTERVAL_S = 1.0 / FRAME_FPS
+FRAME_TARGET_WIDTH = 480  # Bandbreitenschonend; GUI skaliert weiter runter.
+FRAME_JPEG_QUALITY = 70
 
 
-def _camera_name_for_index(camera_index: int) -> str:
-    for idx, name in list_available_cameras():
-        if idx == camera_index:
-            return name
-    return f"Kamera {camera_index}"
-
-
-def _show_camera_probe_dialog():
-    root = tk.Tk()
-    root.withdraw()
-
-    popup = tk.Toplevel(root)
-    popup.title("Kamera")
-    popup.attributes("-topmost", True)
-    popup.resizable(False, False)
-    popup.protocol("WM_DELETE_WINDOW", lambda: None)
-    tk.Label(
-        popup,
-        text="Überprüfen der Kamera, bitte warten...",
-        padx=28,
-        pady=18,
-    ).pack()
-
-    popup.update_idletasks()
-    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
-    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
-    popup.geometry(f"300x100+{max(x, 0)}+{max(y, 0)}")
-    popup.focus_force()
-    popup.grab_set()
-    popup.update()
-    return root, popup
-
-
-def _close_camera_probe_dialog(root, popup):
-    try:
-        popup.grab_release()
-    except Exception:
-        pass
-    try:
-        popup.destroy()
-    except tk.TclError:
-        pass
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
-
-
-def _show_camera_probe_success_dialog(camera_name: str):
-    root = tk.Tk()
-    root.withdraw()
-
-    popup = tk.Toplevel(root)
-    popup.title("Kamera")
-    popup.attributes("-topmost", True)
-    popup.resizable(False, False)
-    tk.Label(
-        popup,
-        text=f"{camera_name}\nerfolgreich eingesetzt für Waage",
-        wraplength=340,
-        justify="center",
-    ).pack(padx=20, pady=14)
-    tk.Button(popup, text="OK", width=10, command=popup.destroy).pack(pady=(0, 12))
-
-    popup.update_idletasks()
-    x = (popup.winfo_screenwidth() - popup.winfo_width()) // 2
-    y = (popup.winfo_screenheight() - popup.winfo_height()) // 2
-    popup.geometry(f"400x100+{max(x, 0)}+{max(y, 0)}")
-    popup.focus_force()
-    popup.wait_window()
-
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
-
-
-def _camera_frame_looks_blocked(frame) -> bool:
-    if frame is None:
-        return True
-    try:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        mean, stddev = cv2.meanStdDev(gray)
-    except Exception:
-        return True
-
-    brightness = float(mean[0][0])
-    contrast = float(stddev[0][0])
-    return brightness <= 3.0 or contrast <= 1.0
-
-
-def _probe_selected_camera(camera_index: int) -> bool:
-    probe_root, probe_popup = _show_camera_probe_dialog()
+def _try_open_camera(camera_index: int):
+    """
+    Versucht Kamera zu oeffnen. Liefert cv2.VideoCapture oder None.
+    Setzt zusaetzlich Belichtungsparameter, sofern AVFoundation/Treiber sie akzeptieren.
+    """
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
-        logger.warning("Camera index %s is not opened during probe", camera_index)
         cap.release()
-        _close_camera_probe_dialog(probe_root, probe_popup)
-        return False
+        return None
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+    cap.set(cv2.CAP_PROP_EXPOSURE, -10)
+    return cap
 
-    try:
-        time.sleep(0.3)
-        good_frames = 0
-        for _ in range(10):
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-            if _camera_frame_looks_blocked(frame):
-                continue
-            good_frames += 1
-            if good_frames >= 2:
-                return True
 
+def _open_first_working_camera(start_index: int = 0, max_search: int = 6,
+                                tcc_retry_attempts: int = 6, tcc_retry_delay_s: float = 1.5):
+    """
+    Faengt mit start_index an, geht durch list_available_cameras(), faellt zurueck
+    auf 0..max_search-1. Gibt (cap, used_index) zurueck oder (None, -1).
+
+    macOS-TCC-Race: nach `tccutil reset` oder dem allerersten Bundle-Start liefert
+    der erste cv2.VideoCapture False, weil die Permission-Antwort vom User erst
+    waehrend des Calls eintrudelt. Wir wiederholen die Sequenz bis zu N-mal mit
+    kleiner Pause - ohne UI - bis macOS den Stream durchlaesst.
+    """
+    import time as _time
+    listed = [idx for idx, _ in list_available_cameras()]
+    candidates = []
+    if start_index in listed:
+        candidates.append(start_index)
+    candidates.extend(idx for idx in listed if idx != start_index)
+    candidates.extend(idx for idx in range(max_search) if idx not in candidates)
+
+    for attempt in range(tcc_retry_attempts):
+        for idx in candidates:
+            cap = _try_open_camera(idx)
+            if cap is not None:
+                logger.info("Opened camera index %s (attempt %s)", idx, attempt)
+                return cap, idx
         logger.warning(
-            "Camera index %s only returned %s good frames during probe",
-            camera_index,
-            good_frames,
+            "Kein Kamera-Index oeffenbar (attempt %s/%s) - vermutlich TCC nicht durch, retry in %.1fs",
+            attempt + 1, tcc_retry_attempts, tcc_retry_delay_s,
         )
-        return False
-    finally:
-        cap.release()
-        _close_camera_probe_dialog(probe_root, probe_popup)
+        _time.sleep(tcc_retry_delay_s)
+    return None, -1
 
-
-def _camera_capture_is_usable(cap, camera_index: int) -> bool:
-    for _ in range(5):
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            continue
-        if _camera_frame_looks_blocked(frame):
-            logger.warning("Camera index %s returned blocked/dark frames", camera_index)
-            return False
-        return True
-
-    logger.warning("Camera index %s did not return readable frames", camera_index)
-    return False
-
-
-def select_camera_index() -> int:
-    cameras = list_available_cameras()
-    if not cameras:
-        raise RuntimeError("No Camera found")
-
-    root = tk.Tk()
-    root.withdraw()
-
-    popup_w = 360
-    popup_h = 300
-    result = {"index": None}
-
-    popup = tk.Toplevel()
-    popup.title("Kamera Für die Waage auswählen")
-    popup.geometry(f"{popup_w}x{popup_h}")
-    popup.resizable(False, False)
-    popup.attributes("-topmost", True)
-    popup.protocol("WM_DELETE_WINDOW", popup.destroy)
-
-    popup.update_idletasks()
-    x = (popup.winfo_screenwidth() - popup_w) // 2
-    y = (popup.winfo_screenheight() - popup_h) // 2
-    popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
-
-    frame = tk.Frame(popup, padx=12, pady=12)
-    frame.pack(fill="both", expand=True)
-    tk.Label(frame, text="Verfügbare Kameras:").pack(anchor="w", pady=(0, 8))
-
-    listbox = tk.Listbox(frame, height=10)
-    for cam_idx, cam_name in cameras:
-        listbox.insert(tk.END, f"[{cam_idx}] {cam_name}")
-    listbox.pack(fill="both", expand=True)
-    listbox.selection_set(0)
-
-    def choose():
-        sel = listbox.curselection()
-        if not sel:
-            return
-        result["index"] = cameras[sel[0]][0]
-        popup.destroy()
-
-    btn_row = tk.Frame(frame)
-    btn_row.pack(pady=(10, 0))
-    tk.Button(btn_row, text="Öffnen", width=14, command=choose).pack(side=tk.LEFT, padx=6)
-    tk.Button(btn_row, text="Abbrechen", width=14, command=popup.destroy).pack(side=tk.LEFT, padx=6)
-
-    popup.focus_force()
-    popup.wait_window()
-
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
-
-    if result["index"] is None:
-        raise RuntimeError("Kameraauswahl abgebrochen.")
-    return result["index"]
-
-
-_select_camera_index_once = select_camera_index
-
-
-def select_camera_index() -> int:
-    while True:
-        camera_index = _select_camera_index_once()
-        if _probe_selected_camera(camera_index):
-            _show_camera_probe_success_dialog(_camera_name_for_index(camera_index))
-            return camera_index
-        _show_camera_in_use_dialog()
 
 def red_mask(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -433,144 +250,22 @@ def _decode_current_weight(frame, last_boxes):
     return text, last_boxes
 
 
-def _show_detection_error_dialog(cap, initial_frame, last_boxes):
-    root = tk.Tk()
-    root.withdraw()
-
-    popup_w = 460
-    popup_h = 180
-    state = {"retry_requested": False}
-    current_frame = initial_frame
-    updated_boxes = last_boxes
-
-    popup = tk.Toplevel(root)
-    popup.title("Fehler")
-    popup.geometry(f"{popup_w}x{popup_h}")
-    popup.resizable(False, False)
-    popup.attributes("-topmost", True)
-
-    def close(event=None):
-        try:
-            popup.destroy()
-        except tk.TclError:
-            pass
-
-        try:
-            root.destroy()
-        except tk.TclError:
-            pass
-
-        state["retry_requested"] = False
-        state["cancel"] = True
-
-    popup.protocol("WM_DELETE_WINDOW", close)
-    popup.bind("<Escape>", close)
-
-    popup.update_idletasks()
-    x = (popup.winfo_screenwidth() - popup_w) // 2
-    y = 40
-    popup.geometry(f"{popup_w}x{popup_h}+{max(x, 0)}+{max(y, 0)}")
-
-    frame = tk.Frame(popup, padx=16, pady=16)
-    frame.pack(fill="both", expand=True)
-
-    tk.Label(
-        frame,
-        text="Fehler: Bitte Kamera anpassen",
-        font=("Arial", 16, "bold"),
-        justify="center",
-    ).pack(pady=(8, 16))
-
-    def request_retry():
-        state["retry_requested"] = True
-
-    tk.Button(frame, text="OK", width=12, command=request_retry).pack()
-
-    try:
-        while True:
-            if state.get("cancel"):
-                break
-            
-            ok, next_frame = cap.read()
-            if ok and next_frame is not None:
-                current_frame = next_frame
-
-            mask = red_mask(current_frame)
-            boxes = auto_digit_boxes_from_mask(mask)
-            dbg = _build_debug_image(mask, boxes)
-
-            cv2.imshow("live", current_frame)
-            cv2.imshow("debug", dbg)
-
-            cv2.moveWindow("live", 50, 250)
-            cv2.moveWindow("debug", 700, 250)
-            
-            cv2.waitKey(1)
-
-            root.update_idletasks()
-            root.update()
-
-            if not state["retry_requested"]:
-                continue
-
-            state["retry_requested"] = False
-            if boxes is None:
-                logger.error("Auto Detection failed, no boxes found")
-                continue
-
-            text = decode_from_fixed_boxes(mask, boxes)
-            if text is None:
-                logger.error("Digit decode failed during manual retry")
-                continue
-
-            updated_boxes = boxes
-            break
-
-
-    finally:
-        try:
-            popup.destroy()
-        except tk.TclError:
-            pass
-        try:
-            root.destroy()
-        except tk.TclError:
-            pass
-        try:
-            cv2.destroyWindow("live")
-        except cv2.error:
-            pass
-        try:
-            cv2.destroyWindow("debug")
-        except cv2.error:
-            pass
-
-    return updated_boxes
-
-
 async def main(cam_index: int = 0):
-    def open_camera(camera_index: int):
-        opened_cap = cv2.VideoCapture(camera_index)
-        opened_cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-        opened_cap.set(cv2.CAP_PROP_EXPOSURE, -10)
-        if not opened_cap.isOpened():
-            opened_cap.release()
-            raise RuntimeError("Webcam cannot be opened.")
-        if not _camera_capture_is_usable(opened_cap, camera_index):
-            opened_cap.release()
-            raise RuntimeError("Camera is already in use.")
-        return opened_cap
-
-    while True:
-        try:
-            cap = open_camera(cam_index)
-            break
-        except RuntimeError as exc:
-            logger.warning("Opening selected camera failed: %s", exc)
-            _show_camera_in_use_dialog()
-            cam_index = select_camera_index()
+    """
+    Dialog-freier Hauptlauf:
+    - Auto-pick: erste oeffenbare Kamera ab cam_index
+    - Frames werden als JPEG-base64 ueber WS an die GUI gestreamt (~12 fps)
+    - SET_CAMERA von der GUI wechselt zur uebergebenen Kamera-Index
+    - Decode-Fehler werden geloggt (kein Modal); GUI zeigt das Live-Bild
+      damit der Nutzer die Kamera physisch nachjustieren kann
+    """
+    cap, cam_index = _open_first_working_camera(start_index=cam_index)
+    if cap is None:
+        logger.error("Keine Kamera oeffnenbar")
+        return
 
     last_boxes = None
+    frame = None
 
     ws = WebSocketClient(URL)
 
@@ -586,15 +281,44 @@ async def main(cam_index: int = 0):
 
     def weight_provider():
         nonlocal last_boxes
-
+        if frame is None:
+            return None
         text, last_boxes = _decode_current_weight(frame, last_boxes)
         if text is None:
-            last_boxes = _show_detection_error_dialog(cap, frame, last_boxes)
+            logger.warning("Weight decode failed - bitte Kamera ausrichten")
             return None
-        
         return text
 
     weight_client = WeightClient(ws, weight_provider)
+
+    last_frame_send = 0.0
+
+    async def stream_frame(current_frame):
+        """JPEG-encode + base64 + WS-send. Verwirft den Frame bei WS-Fehler."""
+        nonlocal last_frame_send
+        now = time.monotonic()
+        if now - last_frame_send < FRAME_INTERVAL_S:
+            return
+        h, w = current_frame.shape[:2]
+        if w > FRAME_TARGET_WIDTH:
+            scale = FRAME_TARGET_WIDTH / w
+            small = cv2.resize(current_frame, (FRAME_TARGET_WIDTH, int(h * scale)))
+        else:
+            small = current_frame
+        ok_enc, jpeg = cv2.imencode(
+            ".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, FRAME_JPEG_QUALITY]
+        )
+        if not ok_enc:
+            return
+        try:
+            await ws.send_json({
+                "type": "FRAME",
+                "data": base64.b64encode(jpeg.tobytes()).decode("ascii"),
+            })
+            last_frame_send = now
+        except WebSocketDisconnected:
+            # Reconnect erfolgt im naechsten recv-Pfad; Frame fallenlassen.
+            pass
 
     try:
         await connect_with_retry()
@@ -602,7 +326,11 @@ async def main(cam_index: int = 0):
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
-                return None
+                logger.warning("Kamera-Read fehlgeschlagen")
+                await asyncio.sleep(0.05)
+                continue
+
+            await stream_frame(frame)
 
             try:
                 msg = await asyncio.wait_for(ws.recv_json(), timeout=0.01)
@@ -614,23 +342,22 @@ async def main(cam_index: int = 0):
                 await weight_client.register()
                 continue
 
-            if msg.get("type") == "OPEN_CAMERA_SELECTION":
-                try:
-                    selected_camera = select_camera_index()
-                except RuntimeError:
-                    continue
-
-                try:
-                    new_cap = open_camera(selected_camera)
-                except RuntimeError as exc:
-                    logger.warning("Opening selected camera failed: %s", exc)
-                    _show_camera_in_use_dialog()
-                    continue
-
-                cap.release()
-                cap = new_cap
-                cam_index = selected_camera
-                last_boxes = None
+            if msg.get("type") == "SET_CAMERA":
+                target_idx = msg.get("index")
+                if isinstance(target_idx, int):
+                    logger.info("SET_CAMERA -> index=%s", target_idx)
+                    cap.release()
+                    new_cap, new_idx = _open_first_working_camera(
+                        start_index=target_idx, tcc_retry_attempts=2,
+                    )
+                    if new_cap is not None:
+                        cap, cam_index = new_cap, new_idx
+                        last_boxes = None
+                    else:
+                        logger.warning("SET_CAMERA failed, restoring previous index %s", cam_index)
+                        cap, cam_index = _open_first_working_camera(
+                            start_index=cam_index, tcc_retry_attempts=2,
+                        )
                 continue
 
             try:
@@ -642,9 +369,11 @@ async def main(cam_index: int = 0):
 
     finally:
         await ws.close()
-        cap.release()
+        if cap is not None:
+            cap.release()
         cv2.destroyAllWindows()
 
+
 if __name__ == "__main__":
-    selected_camera = select_camera_index()
-    asyncio.run(main(selected_camera))
+    start = int(os.environ.get("WEIGHIN_CAMERA", "0"))
+    asyncio.run(main(start))

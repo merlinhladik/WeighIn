@@ -3,7 +3,13 @@
 # SPDX-License-Identifier: CC0-1.0
 __pycache__/
 sources/venv/
+sources/logs/
+.venv-macos/
 .vscode
+.vscode/
+.DS_Store
 dist
 build
-.vscode/
+*.spec
+.coverage
+html/

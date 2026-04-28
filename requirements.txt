@@ -3,9 +3,11 @@ opencv-python
 numpy
 pandas
 keyboard
+Pillow>=10.0
 
 # For camera access
-pygrabber; platform_system = "Windows"
+pygrabber; platform_system == "Windows"
+pyobjc-framework-AVFoundation>=10.0; platform_system == "Darwin"
 
 # For packaging the application
 pyinstaller
