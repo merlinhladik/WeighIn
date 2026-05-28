@@ -14,7 +14,7 @@ from shared.logging_config import configure_logging
 
 logger = configure_logging("weight")
 
-URL = "ws://localhost:8765"
+URL = "ws://localhost:8766"
 RECONNECT_DELAY_S = 2.0
 
 DECODE_W, DECODE_H = 80, 140

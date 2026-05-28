@@ -23,7 +23,7 @@ except Exception:
 
 logger = configure_logging("real_scanner")
 
-URL = "ws://localhost:8765"
+URL = "ws://localhost:8766"
 COOLDOWN_S = 1.0
 HOTKEY_DEBOUNCE_S = 0.35
 SCAN_HINT = "Bitte den QR scannen und hier nichts eintippen"
