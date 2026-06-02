@@ -9,12 +9,16 @@ import os
 import sys
 import asyncio
 import base64
+import signal
+import subprocess
 import threading
+import time
 from io import BytesIO
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import websockets
 from shared.logging_config import configure_logging
+from shared.settings import load_settings, save_settings
 
 try:
     from PIL import Image, ImageTk
@@ -121,6 +125,15 @@ class WeighingApp(tk.Tk):
         self.qr_ws_clients = set()
         self.weight_ws_clients = set()
         self.scanner_ws_clients = set()
+        # Wenn der User den Waagen-Scan zur Laufzeit wieder einschaltet,
+        # spawnt die GUI weight.py selbst hier rein (Launcher hat den
+        # Subprozess beim Boot übersprungen). Beim Programm-Ende oder beim
+        # erneuten Aus-Toggle wird der Prozess sauber terminiert.
+        self.weight_subprocess: Optional[subprocess.Popen] = None
+        # Spiegel für scanner: GUI kann real_scanner.py nachträglich
+        # spawnen, wenn der User den scanner_mode wechselt (off/hotkey/camera).
+        # Siehe Libraries/WeighIn.md "Subprozess-Lifecycle-Modell".
+        self.scanner_subprocess: Optional[subprocess.Popen] = None
         self.external_program_threads: List[threading.Thread] = []
         self.external_programs_started = False
          
@@ -638,10 +651,25 @@ class WeighingApp(tk.Tk):
         self.scanner_hardware_button.pack_forget()
         self.scanner_status_label.pack_forget()
 
-        if getattr(self, "scanner_mode", "camera") == "hardware":
-            self.scanner_hardware_button.pack(fill="both", expand=True)
+        mode = getattr(self, "scanner_mode", "hotkey")
+        if mode == "off":
+            # Pass-Scanner komplett deaktiviert — Hinweis statt Widget.
+            if not hasattr(self, "scanner_disabled_label"):
+                self.scanner_disabled_label = tk.Label(
+                    self.scanner_cell,
+                    bg=THEME["secondary"],
+                    text="Pass-Scanner deaktiviert",
+                    fg="#9a9a9a",
+                    font=("Rubik", 11),
+                )
+            self.scanner_disabled_label.pack(fill="both", expand=True)
         else:
-            self.scanner_camera_label.pack(fill="both", expand=True)
+            if hasattr(self, "scanner_disabled_label"):
+                self.scanner_disabled_label.pack_forget()
+            if mode == "hotkey":
+                self.scanner_hardware_button.pack(fill="both", expand=True)
+            else:  # "camera"
+                self.scanner_camera_label.pack(fill="both", expand=True)
         self.scanner_status_label.pack(fill="x", pady=(4, 0))
 
     def open_hardware_scan_input(self):
@@ -695,11 +723,15 @@ class WeighingApp(tk.Tk):
             pass
 
     def _handle_qr_scan_request(self, _event=None):
-        """F12-Dispatcher: im Hardware-Modus oeffnet das Input-Modal,
-        sonst sendet OPEN_SCAN_POPUP an den real_scanner-Subprocess."""
-        if getattr(self, "scanner_mode", "camera") == "hardware":
+        """F12-Dispatcher: im Hotkey-Modus oeffnet das Input-Modal,
+        sonst sendet OPEN_SCAN_POPUP an den real_scanner-Subprocess.
+        Im "off"-Modus passiert nichts (Pass-Scanner deaktiviert)."""
+        mode = getattr(self, "scanner_mode", "hotkey")
+        if mode == "off":
+            return
+        if mode == "hotkey":
             self.open_hardware_scan_input()
-        else:
+        else:  # "camera"
             self.trigger_qr_scan_hotkey()
 
     def search_participants(self, query: str) -> list[dict]:
@@ -924,9 +956,14 @@ class WeighingApp(tk.Tk):
         self.max_age_years = DEFAULT_MAX_AGE_YEARS
         self.double_start_mode = "standard"
         self.double_start_years = []
-        # "camera" = Live-Stream vom real_scanner-Subprocess,
-        # "hardware" = USB-QR-Scanner der wie eine Tastatur eintippt.
-        self.scanner_mode = "camera"
+        # "off"    = real_scanner nicht laufen lassen,
+        # "hotkey" = USB-QR-Scanner der wie eine Tastatur eintippt (Default),
+        # "camera" = Live-Stream vom real_scanner-Subprocess.
+        # Single Source of Truth: ~/.weighin/settings.json (Schlüssel
+        # `scanner_mode`). Persist + Runtime-Switch laufen über den
+        # Settings-Dialog (open_settings_window -> save_and_close).
+        _persisted = load_settings()
+        self.scanner_mode = str(_persisted.get("scanner_mode", "hotkey"))
 
     def load_event_settings(self):
         """Loads age range and tolerance config from setting.json near selected data source."""
@@ -1753,12 +1790,17 @@ class WeighingApp(tk.Tk):
             width=20,
         ).pack(pady=(4, 12))
 
-        # Pass-Scanner-Eingabemodus: Kamera-Stream oder USB-Tastatur-Scanner
+        # Pass-Scanner-Eingabemodus: Aus / USB-Tastatur-Scanner / Live-Kamera.
+        # Wirkung greift sofort beim Speichern (SHUTDOWN + Re-Spawn).
         tk.Label(popup, text="Pass-Scanner-Eingabe", **lbl_style).pack(pady=(8, 4))
-        scanner_mode_label_to_value = {"Kamera": "camera", "Hardware-Scanner": "hardware"}
+        scanner_mode_label_to_value = {
+            "Aus": "off",
+            "Hardware-Scanner": "hotkey",
+            "Kamera": "camera",
+        }
         scanner_mode_value_to_label = {v: k for k, v in scanner_mode_label_to_value.items()}
         scanner_mode_var = tk.StringVar(
-            value=scanner_mode_value_to_label.get(self.scanner_mode, "Kamera")
+            value=scanner_mode_value_to_label.get(self.scanner_mode, "Hardware-Scanner")
         )
         scanner_mode_combo = ttk.Combobox(
             popup,
@@ -1768,6 +1810,34 @@ class WeighingApp(tk.Tk):
             width=22,
         )
         scanner_mode_combo.pack(pady=(0, 12))
+
+        # Waagen-Scan-Toggle (Wirkung beim nächsten Programm-Start: der
+        # Launcher main.py spawnt den weight-Subprozess dann nicht und gibt
+        # so die Scale-Kamera für andere Anwendungen frei).
+        persisted_settings = load_settings()
+        weight_scan_var = tk.BooleanVar(
+            value=bool(persisted_settings.get("weight_scan_enabled", True))
+        )
+        tk.Checkbutton(
+            popup,
+            text="Waagen-Scan beim nächsten Start aktivieren",
+            variable=weight_scan_var,
+            bg=THEME["bg"],
+            fg=THEME["fg"],
+            activebackground=THEME["bg"],
+            activeforeground=THEME["fg"],
+            selectcolor=THEME["input_bg"],
+            font=("Rubik", 11),
+        ).pack(pady=(8, 2))
+        tk.Label(
+            popup,
+            text="Aus = Scale-Kamera wird sofort freigegeben (weight beendet sich). An = weight wird sofort gestartet.",
+            bg=THEME["bg"],
+            fg="gray",
+            font=("Rubik", 9),
+            wraplength=470,
+            justify="center",
+        ).pack(pady=(0, 12))
 
         def _on_settings_close():
             if popup == self.settings_popup:
@@ -1807,10 +1877,73 @@ class WeighingApp(tk.Tk):
 
             self.weight_decimal_places = selected_places
 
-            new_mode = scanner_mode_label_to_value.get(scanner_mode_var.get(), "camera")
-            if new_mode != self.scanner_mode:
-                self.scanner_mode = new_mode
+            # Scanner-Modus: persistieren UND zur Laufzeit umsetzen.
+            # Drei Modi: off | hotkey | camera. Wechsel = SHUTDOWN an aktuelle
+            # Scanner-Clients + GUI-Subprozess-Stop + ggf. Re-Spawn mit neuer
+            # env. Persistenz für Cold-Start im Launcher.
+            old_scanner_mode = str(persisted_settings.get("scanner_mode", "hotkey"))
+            new_scanner_mode = scanner_mode_label_to_value.get(
+                scanner_mode_var.get(), "hotkey"
+            )
+            scanner_camera_idx = int(persisted_settings.get("scanner_camera_index", 0))
+            try:
+                save_settings({"scanner_mode": new_scanner_mode})
+            except OSError as exc:
+                messagebox.showwarning(
+                    "Einstellungen",
+                    f"Scanner-Modus konnte nicht gespeichert werden: {exc}",
+                    parent=popup,
+                )
+            if new_scanner_mode != self.scanner_mode:
+                self.scanner_mode = new_scanner_mode
                 self._apply_scanner_mode_ui()
+            if new_scanner_mode != old_scanner_mode:
+                # Alten Scanner immer abräumen (SHUTDOWN greift nur im
+                # Streaming-Mode, _stop kümmert sich um den Rest).
+                self.send_scanner_shutdown()
+                self._stop_scanner_subprocess()
+                if new_scanner_mode != "off":
+                    if not self.start_scanner_subprocess(new_scanner_mode, scanner_camera_idx):
+                        messagebox.showwarning(
+                            "Einstellungen",
+                            f"Pass-Scanner konnte nicht gestartet werden "
+                            f"(Modus={new_scanner_mode}, Kamera-Index={scanner_camera_idx}).\n\n"
+                            "Häufige Ursache: gewählte Kamera existiert nicht. "
+                            "Über 'Kamera auswählen' einen anderen Index setzen "
+                            "(z. B. 0 für die interne Kamera).",
+                            parent=popup,
+                        )
+
+            # Waagen-Scan-Toggle: persistieren UND zur Laufzeit umsetzen.
+            # Persistenz ist für den nächsten Cold-Start (Launcher liest sie).
+            # Runtime-Wirkung: Aus -> SHUTDOWN an verbundenen weight-Client
+            # (Kamera frei), An -> GUI spawnt weight.py selbst.
+            old_weight_enabled = bool(persisted_settings.get("weight_scan_enabled", True))
+            new_weight_enabled = bool(weight_scan_var.get())
+            try:
+                save_settings({"weight_scan_enabled": new_weight_enabled})
+            except OSError as exc:
+                messagebox.showwarning(
+                    "Einstellungen",
+                    f"Waagen-Scan-Einstellung konnte nicht gespeichert werden: {exc}",
+                    parent=popup,
+                )
+            if new_weight_enabled != old_weight_enabled:
+                if new_weight_enabled:
+                    if not self.start_weight_subprocess():
+                        messagebox.showwarning(
+                            "Einstellungen",
+                            "Waagen-Scan konnte nicht gestartet werden — siehe Log.",
+                            parent=popup,
+                        )
+                else:
+                    self.send_weight_shutdown()
+                    # Falls GUI weight.py früher selbst gespawnt hatte, jetzt
+                    # auch den Prozess sauber abräumen (SHUTDOWN beendet ihn,
+                    # aber wir wollen unsere Buchhaltung sauber halten).
+                    self._stop_weight_subprocess()
+                # Stale-Frame-Reset + Layout-Hide/Show konsistent halten.
+                self._apply_weight_visibility(new_weight_enabled)
 
             if self.pending_received_weight is not None and self.weight_popup is not None and self.weight_popup.winfo_exists():
                 self.show_weight_popup(self.pending_received_weight)
@@ -1874,30 +2007,45 @@ class WeighingApp(tk.Tk):
 
         cam_labels = [f"[{i}] {name}" for i, name in cameras]
 
+        # Wenn der Waagen-Scan ausgeschaltet ist, hat eine Waagen-Kamera-
+        # Zuweisung keinen Effekt (weight.py läuft nicht). Wir blenden die
+        # Zeile dann komplett aus, und der Pass-Scanner kann frei jede
+        # Kamera wählen (auch die, die sonst die Waage hatte).
+        weight_enabled = bool(load_settings().get("weight_scan_enabled", True))
+
         frame = tk.Frame(popup, bg=THEME["bg"], padx=20, pady=18)
         frame.pack(fill="both", expand=True)
 
-        tk.Label(
-            frame, text="Waage:", bg=THEME["bg"], fg=THEME["fg"], font=("Rubik", 11)
-        ).grid(row=0, column=0, sticky="w", pady=6)
-        weight_combo = ttk.Combobox(frame, values=cam_labels, state="readonly", width=32)
-        weight_combo.current(0)
-        weight_combo.grid(row=0, column=1, padx=(10, 0), pady=6)
+        weight_combo: Optional[ttk.Combobox] = None
+        next_row = 0
+        if weight_enabled:
+            tk.Label(
+                frame, text="Waage:", bg=THEME["bg"], fg=THEME["fg"], font=("Rubik", 11)
+            ).grid(row=next_row, column=0, sticky="w", pady=6)
+            weight_combo = ttk.Combobox(frame, values=cam_labels, state="readonly", width=32)
+            weight_combo.current(0)
+            weight_combo.grid(row=next_row, column=1, padx=(10, 0), pady=6)
+            next_row += 1
 
         tk.Label(
             frame, text="Pass-Scanner:", bg=THEME["bg"], fg=THEME["fg"], font=("Rubik", 11)
-        ).grid(row=1, column=0, sticky="w", pady=6)
+        ).grid(row=next_row, column=0, sticky="w", pady=6)
         scanner_combo = ttk.Combobox(frame, values=cam_labels, state="readonly", width=32)
-        scanner_combo.current(min(1, len(cameras) - 1))
-        scanner_combo.grid(row=1, column=1, padx=(10, 0), pady=6)
+        # Wenn die Waage aktiv ist, schlagen wir die zweite Kamera vor (vermeidet
+        # Default-Konflikt mit der Waage). Sonst kann der Scanner direkt die
+        # erste / einzige nehmen.
+        scanner_combo.current(min(1, len(cameras) - 1) if weight_enabled else 0)
+        scanner_combo.grid(row=next_row, column=1, padx=(10, 0), pady=6)
+        next_row += 1
 
         btn_row = tk.Frame(frame, bg=THEME["bg"])
-        btn_row.grid(row=2, column=0, columnspan=2, pady=(18, 0))
+        btn_row.grid(row=next_row, column=0, columnspan=2, pady=(18, 0))
 
         def apply_and_close():
-            weight_idx = cameras[weight_combo.current()][0]
+            if weight_combo is not None:
+                weight_idx = cameras[weight_combo.current()][0]
+                self._send_set_camera("weight", weight_idx)
             scanner_idx = cameras[scanner_combo.current()][0]
-            self._send_set_camera("weight", weight_idx)
             self._send_set_camera("scanner", scanner_idx)
             popup.destroy()
 
@@ -1987,7 +2135,7 @@ class WeighingApp(tk.Tk):
             self.ws_clients.discard(client)
 
     def start_websocket_server(self):
-        """Starts the GUI WebSocket server on ws://localhost:8765."""
+        """Starts the GUI WebSocket server on ws://localhost:8766."""
         if websockets is None:
             messagebox.showwarning(
                 "WebSocket",
@@ -2391,6 +2539,245 @@ class WeighingApp(tk.Tk):
             self.qr_ws_clients.discard(client)
             self.ws_clients.discard(client)
 
+    def send_weight_shutdown(self):
+        """Sendet SHUTDOWN an alle verbundenen weight-Clients.
+
+        Triggert in weight.py den Loop-Exit -> Kamera-Release + sauberen
+        Prozess-Exit. Wird vom Settings-Dialog (Toggle aus) und implizit
+        beim Programm-Ende benutzt.
+        """
+        if not self.ws_loop:
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._send_weight_shutdown(), self.ws_loop)
+            fut.result(timeout=1.5)
+        except Exception:
+            pass
+
+    async def _send_weight_shutdown(self):
+        """Async helper to request a graceful weight-client shutdown."""
+        candidate_clients = list(self.weight_ws_clients)
+        if not candidate_clients:
+            return
+        msg = json.dumps({"type": "SHUTDOWN"}, ensure_ascii=False)
+        stale = []
+        for client in candidate_clients:
+            try:
+                await client.send(msg)
+            except Exception:
+                stale.append(client)
+        for client in stale:
+            self.weight_ws_clients.discard(client)
+            self.scanner_ws_clients.discard(client)
+            self.qr_ws_clients.discard(client)
+            self.ws_clients.discard(client)
+
+    def start_weight_subprocess(self) -> bool:
+        """Spawnt weight.py als eigenen Subprozess (Runtime-Aktivierung).
+
+        Wird benutzt, wenn der User den Waagen-Scan zur Laufzeit wieder
+        einschaltet — der Launcher (main.py) hat den weight-Prozess beim
+        Boot übersprungen, jetzt muss die GUI ihn nachträglich starten.
+
+        Unterscheidet Dev-Modus (``python sources/gui.py``) und Packaged
+        (PyInstaller-Bundle, ``sys.frozen``):
+            - Dev: ``[sys.executable, "<repo>/sources/weight.py"]``
+            - Packaged: ``[<bundle_dir>/weight(.exe)]``
+
+        Liefert True, wenn der Subprozess erfolgreich gestartet wurde.
+        """
+        if self.weight_subprocess is not None and self.weight_subprocess.poll() is None:
+            # Läuft schon.
+            return True
+
+        argv = self._weight_subprocess_argv()
+        if argv is None:
+            logger.warning("Kein weight-Entry-Point gefunden (weder Dev-Skript noch Packaged-Binary)")
+            return False
+
+        try:
+            popen_kwargs: Dict[str, Any] = {"env": os.environ.copy()}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["preexec_fn"] = os.setsid
+            self.weight_subprocess = subprocess.Popen(argv, **popen_kwargs)
+            logger.info("weight-Subprozess gestartet (PID %s) via %s",
+                        self.weight_subprocess.pid, argv)
+            return True
+        except Exception as exc:
+            logger.exception("weight-Subprozess konnte nicht gestartet werden: %s", exc)
+            self.weight_subprocess = None
+            return False
+
+    def _weight_subprocess_argv(self) -> Optional[List[str]]:
+        """Ermittelt die Kommandozeile für den weight-Subprozess.
+
+        Packaged (sys.frozen): das ``weight``-Binary liegt neben
+        ``sys.executable``. Dev: ``sources/weight.py`` neben dem GUI-Skript.
+        Liefert ``None``, wenn kein Pfad existiert.
+        """
+        if getattr(sys, "frozen", False):
+            bin_dir = os.path.dirname(sys.executable)
+            ext = ".exe" if os.name == "nt" else ""
+            candidate = os.path.join(bin_dir, "weight" + ext)
+            return [candidate] if os.path.isfile(candidate) else None
+
+        sources_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(sources_dir, "weight.py")
+        if not os.path.isfile(candidate):
+            return None
+        return [sys.executable, candidate]
+
+    def _stop_weight_subprocess(self):
+        """Beendet einen GUI-gespawnten weight-Subprozess (idempotent)."""
+        self._stop_managed_subprocess("weight_subprocess")
+
+    def start_scanner_subprocess(self, mode: str, camera_index: int) -> bool:
+        """Spawnt real_scanner.py mit dem gegebenen Modus (Runtime-Switch).
+
+        Mode "off" wird hier nicht erwartet — save_and_close ruft diesen
+        Helper nur für "hotkey" oder "camera" auf. Im "camera"-Modus wird
+        die env-Var ``WEIGHIN_SCANNER_CAMERA`` gesetzt, damit
+        real_scanner.py den Streaming-Pfad nimmt. Hotkey-Modus startet
+        **ohne** sudo-Eskalation aus der GUI — die GUI kann auf macOS
+        kein osascript-Prompt zuverlässig orchestrieren, ohne die
+        Mainloop zu blockieren. Konsequenz: der Hotkey-F12 funktioniert
+        in dem GUI-gespawnten Prozess nur, wenn die GUI selbst schon
+        mit erhöhten Rechten läuft (was im Tagesbetrieb über
+        sources/main.py + osascript der Fall ist).
+        """
+        if self.scanner_subprocess is not None and self.scanner_subprocess.poll() is None:
+            return True
+
+        argv = self._scanner_subprocess_argv()
+        if argv is None:
+            logger.warning("Kein real_scanner-Entry-Point gefunden")
+            return False
+
+        env = os.environ.copy()
+        if mode == "camera":
+            env["WEIGHIN_SCANNER_CAMERA"] = str(camera_index)
+        else:
+            env.pop("WEIGHIN_SCANNER_CAMERA", None)
+
+        try:
+            popen_kwargs: Dict[str, Any] = {"env": env}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["preexec_fn"] = os.setsid
+            proc = subprocess.Popen(argv, **popen_kwargs)
+            self.scanner_subprocess = proc
+            logger.info("scanner-Subprozess (mode=%s, cam=%s) gestartet (PID %s)",
+                        mode, camera_index, proc.pid)
+        except Exception as exc:
+            logger.exception("scanner-Subprozess konnte nicht gestartet werden: %s", exc)
+            self.scanner_subprocess = None
+            return False
+
+        # Failure-Detect: Kamera-Open in real_scanner ist fast immer der
+        # Stolperstein (falscher Index, TCC-Denial im Bundle-Build, etc.).
+        # Wenn der Subprozess innerhalb ~1.5s wieder tot ist, war es das.
+        # Caller (save_and_close) zeigt dann eine messagebox; hier loggen
+        # wir konkret mit Index, damit das Log-Tail die Diagnose abgibt.
+        time.sleep(1.5)
+        if proc.poll() is not None:
+            logger.warning(
+                "scanner-Subprozess endete sofort (exit=%s, mode=%s, cam=%s). "
+                "Wahrscheinliche Ursache: Kamera-Index %s nicht öffnbar.",
+                proc.returncode, mode, camera_index, camera_index,
+            )
+            self.scanner_subprocess = None
+            return False
+        return True
+
+    def _scanner_subprocess_argv(self) -> Optional[List[str]]:
+        """Pendant zu _weight_subprocess_argv für real_scanner."""
+        if getattr(sys, "frozen", False):
+            bin_dir = os.path.dirname(sys.executable)
+            ext = ".exe" if os.name == "nt" else ""
+            candidate = os.path.join(bin_dir, "real_scanner" + ext)
+            return [candidate] if os.path.isfile(candidate) else None
+
+        sources_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(sources_dir, "real_scanner.py")
+        if not os.path.isfile(candidate):
+            return None
+        return [sys.executable, candidate]
+
+    def _stop_scanner_subprocess(self):
+        """Beendet einen GUI-gespawnten scanner-Subprozess (idempotent)."""
+        self._stop_managed_subprocess("scanner_subprocess")
+
+    def _stop_managed_subprocess(self, attr_name: str):
+        """Generischer Stop-Helper für GUI-verwaltete Subprozesse.
+
+        Wird von ``_stop_weight_subprocess`` und ``_stop_scanner_subprocess``
+        geteilt, um die killpg/terminate/kill-Logik nur einmal zu pflegen.
+        """
+        proc = getattr(self, attr_name, None)
+        setattr(self, attr_name, None)
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            if os.name != "nt":
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except Exception:
+                    proc.terminate()
+            else:
+                proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                if os.name != "nt":
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                else:
+                    proc.kill()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
+        except Exception as exc:
+            logger.warning("Stop subprocess (%s) fehlgeschlagen: %s", attr_name, exc)
+
+    def _apply_weight_visibility(self, weight_enabled: bool):
+        """Blendet das Waagen-Kamera-Widget ein/aus passend zum Toggle.
+
+        Aus: ``scale_camera_label.grid_remove()`` + Scanner kriegt
+        ``columnspan=2`` ab Spalte 0. An: Widget zurück, Scanner zurück
+        in Spalte 1. Plus Stale-Frame-Reset auf den Default-Text.
+        """
+        if not hasattr(self, "scale_camera_label") or not hasattr(self, "scanner_cell"):
+            return
+        try:
+            if weight_enabled:
+                self.scale_camera_label.config(
+                    image="", text="Waagen-Kamera: warte auf Verbindung..."
+                )
+                self._scale_camera_photo = None
+                self.scale_camera_label.grid(
+                    row=10, column=0, padx=(14, 4), pady=(8, 8), sticky="nsew",
+                )
+                self.scanner_cell.grid_configure(
+                    row=10, column=1, columnspan=1, padx=(4, 14),
+                )
+            else:
+                self.scale_camera_label.grid_remove()
+                self.scale_camera_label.config(
+                    image="", text="Waagen-Kamera: warte auf Verbindung..."
+                )
+                self._scale_camera_photo = None
+                self.scanner_cell.grid_configure(
+                    row=10, column=0, columnspan=2, padx=(14, 14),
+                )
+        except Exception as exc:
+            logger.warning("Layout-Switch für Waagen-Widget fehlgeschlagen: %s", exc)
+
     def stop_websocket_server(self):
         """Stops the WebSocket server and closes all client connections."""
         if not self.ws_loop:
@@ -2424,7 +2811,12 @@ class WeighingApp(tk.Tk):
         except Exception:
             pass
         self.close_weight_popup()
+        # SHUTDOWN-Signale rausschicken bevor die Subprozesse gekillt werden,
+        # damit Counterparts noch sauber cleanen (Kamera-release etc.).
         self.send_scanner_shutdown()
+        self.send_weight_shutdown()
+        self._stop_weight_subprocess()
+        self._stop_scanner_subprocess()
         self.stop_websocket_server()
         self.destroy()
 
@@ -2655,6 +3047,12 @@ class WeighingApp(tk.Tk):
         )
 
         self._apply_scanner_mode_ui()
+        # Initial-Layout an persistierte weight_scan_enabled-Settings anpassen
+        # (Waagen-Widget hide/show, Scanner-Cell columnspan).
+        _persisted_init = load_settings()
+        self._apply_weight_visibility(
+            bool(_persisted_init.get("weight_scan_enabled", True))
+        )
 
         box_frame.rowconfigure(10, weight=1)
         action_row = tk.Frame(box_frame, bg=THEME["bg"])

@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 
+from shared.settings import load_settings
+
 
 SOFT_STOP_TIMEOUT_S = 5.0
 HARD_STOP_TIMEOUT_S = 2.0
@@ -195,13 +197,15 @@ def _elevated_command(binary_path):
     return [binary_path]
 
 
-def _start_process(base, name, requires_root=False):
+def _start_process(base, name, requires_root=False, extra_env=None):
     binary_path = _binary_path(base, name)
     command = _elevated_command(binary_path) if requires_root else [binary_path]
 
     env = os.environ.copy()
     if sys.platform.startswith("linux"):
         env.update(_linux_display_env())
+    if extra_env:
+        env.update(extra_env)
 
     # macOS: TCC-Permission (Kamera, Accessibility) nur durch posix_spawn mit
     # disclaim-Flag korrekt vom .app-Bundle an den Subprocess weiterreichen.
@@ -272,18 +276,36 @@ def _stop_process(process):
 def main():
     base = os.path.dirname(sys.executable)
 
-    # real_scanner braucht Root nur im Popup-Modus (fuer das `keyboard`-F12-Hotkey).
-    # Im Streaming-Modus (WEIGHIN_SCANNER_CAMERA gesetzt) wird kein Hotkey
-    # registriert -> als normaler User starten, damit der Subprocess die TCC-
-    # Kamera-Berechtigung des .app-Bundles erbt (sonst eigene root-TCC ohne Grant).
-    scanner_streaming = bool(os.environ.get("WEIGHIN_SCANNER_CAMERA", "").strip())
-    scanner_needs_root = (
-        not sys.platform.startswith("win") and not scanner_streaming
-    )
+    # Persistierte User-Settings (~/.weighin/settings.json) sind autoritativ
+    # für die Subprozess-Komposition beim Boot — siehe
+    # Libraries/WeighIn.md "Subprozess-Lifecycle-Modell". Die historische
+    # WEIGHIN_SCANNER_CAMERA-env-Var wird NICHT mehr direkt respektiert;
+    # nur das `scanner_mode`-Setting + `scanner_camera_index`-Setting.
+    settings = load_settings()
+    weight_scan_enabled = bool(settings.get("weight_scan_enabled", True))
+    scanner_mode = str(settings.get("scanner_mode", "hotkey"))
+    scanner_camera_index = int(settings.get("scanner_camera_index", 1))
 
     gui = _start_process(base, "gui", requires_root=False)
-    weight = _start_process(base, "weight")
-    scanner = _start_process(base, "real_scanner", requires_root=scanner_needs_root)
+
+    weight = _start_process(base, "weight") if weight_scan_enabled else None
+
+    # Scanner: drei Modi.
+    # - "off": kein Subprozess.
+    # - "camera": Streaming-Modus, keine sudo-Eskalation (TCC erbt vom Bundle).
+    # - "hotkey" (Default): USB-Tastatur-Scanner, braucht root für die
+    #   `keyboard`-Lib auf Linux/macOS.
+    if scanner_mode == "off":
+        scanner = None
+    elif scanner_mode == "camera":
+        scanner = _start_process(
+            base, "real_scanner",
+            requires_root=False,
+            extra_env={"WEIGHIN_SCANNER_CAMERA": str(scanner_camera_index)},
+        )
+    else:  # "hotkey"
+        scanner_needs_root = not sys.platform.startswith("win")
+        scanner = _start_process(base, "real_scanner", requires_root=scanner_needs_root)
 
     try:
         gui.wait()

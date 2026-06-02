@@ -342,6 +342,14 @@ async def main(cam_index: int = 0):
                 await weight_client.register()
                 continue
 
+            if msg.get("type") == "SHUTDOWN":
+                # GUI signalisiert: User hat "Waagen-Scan" deaktiviert.
+                # Loop verlassen -> finally schließt Kamera + WS, Prozess endet.
+                # Kein sys.exit hier, damit der finally-Block in jedem Fall
+                # läuft (Kamera-Release ist der ganze Sinn des Toggles).
+                logger.info("SHUTDOWN von GUI empfangen -> Kamera freigeben + beenden")
+                return
+
             if msg.get("type") == "SET_CAMERA":
                 target_idx = msg.get("index")
                 if isinstance(target_idx, int):
