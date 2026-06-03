@@ -18,7 +18,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 import websockets
 from shared.logging_config import configure_logging
-from shared.settings import load_settings, save_settings
+from shared.settings import load_settings, save_settings, ws_server_address
+from shared.list_available_cameras import list_available_cameras
 
 try:
     from PIL import Image, ImageTk
@@ -58,8 +59,9 @@ logger = configure_logging("gui")
 
 PAID = "Zahlung erfolgt"
 UNPAID = "Zahlung offen"
-WS_HOST = "localhost"
-WS_PORT = 8766
+# Bind address of the GUI WebSocket server; configurable via
+# ~/.weighin/settings.json (ws_host / ws_port) to dodge port collisions.
+WS_HOST, WS_PORT = ws_server_address()
 WEIGHT_KEY = "Weight"
 VALID_KEY = "Valid"
 PAID_KEY = "Paid"
@@ -104,6 +106,7 @@ class WeighingApp(tk.Tk):
         self.weight_popup_name_label: Optional[tk.Label] = None
         self.weight_popup_value_label: Optional[tk.Label] = None
         self.add_participant_popup: Optional[tk.Toplevel] = None
+        self.add_participant_camera_label: Optional[tk.Label] = None
         self.settings_popup: Optional[tk.Toplevel] = None
         self.add_participant_fields: Dict[str, Any] = {}
         self.saved_form_snapshot: Optional[Dict[str, str]] = None
@@ -144,6 +147,9 @@ class WeighingApp(tk.Tk):
         self.prompt_for_data_source_selection()
         self.register_keyboard_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Standalone launch (not via main.py): make the GUI self-sufficient and
+        # spawn the scanner subprocess for the persisted mode once the loop runs.
+        self.after(400, self._maybe_spawn_scanner_on_startup)
 
     def create_action_buttons(self):
         """Creates the bottom navigation and action buttons."""
@@ -527,6 +533,20 @@ class WeighingApp(tk.Tk):
             self.fill_add_participant_from_qr(qr_data)
             return
         self.apply_qr_match(qr_data)
+
+    def scan_for_add_participant(self):
+        """Trigger a pass scan from the 'Neuer Teilnehmer' dialog. The result
+        flows back through handle_incoming_qr, which — because the dialog is
+        open — fills the form via fill_add_participant_from_qr.
+
+        Camera mode asks the scanner subprocess to capture; hotkey/off open the
+        manual QR-input modal (a USB scanner types into it, or paste the string),
+        so the button always works even without a running camera scanner."""
+        mode = getattr(self, "scanner_mode", "hotkey")
+        if mode == "camera":
+            self.trigger_qr_scan_hotkey()
+        else:
+            self.open_hardware_scan_input()
         
     
     def get_filtered_participants(self, query: str) -> List[Dict[str, Any]]:
@@ -940,13 +960,20 @@ class WeighingApp(tk.Tk):
         if hasattr(self, "load_event_settings"):
             self.load_event_settings()
         try:
-            with open(self.data_file_path, "r", encoding="utf-8-sig") as f:
-                data = json.load(f)
-            raw_participants = data if isinstance(data, list) else data.get("participants", [])
+            # CSV is a sibling exchange format to JSON (same schema, ';' +
+            # UTF-8-BOM) — see CLAUDE.md contestants_*.csv invariant. Format is
+            # picked from the file extension; save_data writes back the same one.
+            if self.data_file_path.lower().endswith(".csv"):
+                from shared.contestants_csv import read_contestants_csv
+                raw_participants = read_contestants_csv(self.data_file_path)
+            else:
+                with open(self.data_file_path, "r", encoding="utf-8-sig") as f:
+                    data = json.load(f)
+                raw_participants = data if isinstance(data, list) else data.get("participants", [])
             self.participants = [p for p in raw_participants if isinstance(p, dict)]
             self.update_list(self.participants)
         except Exception as e:
-            messagebox.showerror("Error", f"Could not load data: {e}")         
+            messagebox.showerror("Error", f"Could not load data: {e}")
 
     def load_settings(self):
         """Applies startup defaults without loading persisted file settings."""
@@ -964,6 +991,11 @@ class WeighingApp(tk.Tk):
         # Settings-Dialog (open_settings_window -> save_and_close).
         _persisted = load_settings()
         self.scanner_mode = str(_persisted.get("scanner_mode", "hotkey"))
+        # create_layout() already ran _apply_scanner_mode_ui() with the "hotkey"
+        # default (scanner_mode wasn't set yet at that point); refresh the cell
+        # now that the persisted mode is known — otherwise camera mode keeps
+        # showing the hardware-scanner button instead of the camera cell.
+        self._apply_scanner_mode_ui()
 
     def load_event_settings(self):
         """Loads age range and tolerance config from setting.json near selected data source."""
@@ -1262,11 +1294,16 @@ class WeighingApp(tk.Tk):
         self.update_save_button_state()
 
     def save_data(self):
-        """Writes current participant data back to JSON."""
+        """Writes current participant data back, preserving the source format
+        (format-follows-source: .csv stays .csv, .json stays .json)."""
         if not self.data_file_path:
             raise RuntimeError("No data source selected.")
-        with open(self.data_file_path, "w", encoding="utf-8") as f:
-            json.dump(self.participants, f, ensure_ascii=False, indent=2)
+        if self.data_file_path.lower().endswith(".csv"):
+            from shared.contestants_csv import write_contestants_csv
+            write_contestants_csv(self.data_file_path, self.participants)
+        else:
+            with open(self.data_file_path, "w", encoding="utf-8") as f:
+                json.dump(self.participants, f, ensure_ascii=False, indent=2)
 
     def read_scale(self):
         """Requests a new reading from the connected weight scanner."""
@@ -1429,7 +1466,7 @@ class WeighingApp(tk.Tk):
 
         popup = tk.Toplevel(self)
         popup.title("Neuen Teilnehmer hinzufügen")
-        popup.geometry("460x480")
+        popup.geometry("460x760")
         popup.configure(bg=THEME["bg"])
         self.add_participant_popup = popup
 
@@ -1600,9 +1637,54 @@ class WeighingApp(tk.Tk):
             "paid_var": paid_var,
         }
 
+        # Pass-Scan UNTER den Speichern/Abbrechen-Buttons. Erkannte QR-Daten
+        # fließen über handle_incoming_qr -> fill_add_participant_from_qr in die
+        # Felder (Vorname/Nachname/Geburtsjahr/Gültigkeit). Modusabhängig wie im
+        # Scanner-Tab: Kamera-Modus = Live-Vorschau (laufende QR-Erkennung,
+        # einfach den Pass vorhalten); Hand-Scanner/Aus = Button öffnet das
+        # QR-Eingabe-Modal.
+        row += 1
+        self.add_participant_camera_label = None
+        if getattr(self, "scanner_mode", "hotkey") == "camera":
+            cam_label = tk.Label(
+                popup,
+                bg=THEME["secondary"],
+                text="Pass vor die Kamera halten …",
+                fg="#9a9a9a",
+                font=("Rubik", 11),
+                anchor="center",
+                justify="center",
+                height=8,
+            )
+            cam_label.grid(row=row, column=0, columnspan=2,
+                           padx=20, pady=(0, 18), sticky="nsew")
+            popup.rowconfigure(row, weight=1)
+            self.add_participant_camera_label = cam_label
+        else:
+            # Scanner-/Aus-Modus: großer F12-Button im selben Feld, in dem sonst
+            # die Kamera-Vorschau läge (Stil + Größe wie der Hardware-Button im
+            # Scanner-Tab). Klick/F12 öffnet das QR-Eingabe-Modal → füllt den
+            # Dialog über handle_incoming_qr.
+            scan_btn = tk.Button(
+                popup,
+                text="QR scannen (F12)",
+                command=self.scan_for_add_participant,
+                bg=THEME["accent"],
+                fg="#ffffff",
+                activebackground=THEME["accent"],
+                activeforeground="#ffffff",
+                font=("Rubik", 16, "bold"),
+                relief="flat",
+                cursor="hand2",
+            )
+            scan_btn.grid(row=row, column=0, columnspan=2,
+                          padx=20, pady=(0, 18), sticky="nsew")
+            popup.rowconfigure(row, weight=1)
+
         def _on_popup_close():
             self.add_participant_popup = None
             self.add_participant_fields = {}
+            self.add_participant_camera_label = None
             popup.destroy()
 
         popup.protocol("WM_DELETE_WINDOW", _on_popup_close)
@@ -1675,6 +1757,12 @@ class WeighingApp(tk.Tk):
             self.settings_popup.lift()
             self.settings_popup.focus_force()
             return
+
+        # Re-scan connected cameras and reconcile the persisted scanner camera
+        # (match by name, refresh the index) — indices can shuffle across
+        # replug/reboot, so this keeps the stored selection pointing at the
+        # camera the user actually picked.
+        self._refresh_camera_settings()
 
         popup_w = 520
         popup_h = 460
@@ -1752,14 +1840,20 @@ class WeighingApp(tk.Tk):
             selected_path = filedialog.askopenfilename(
                 parent=popup,
                 title="Daten laden",
-                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                filetypes=[("Teilnehmer (JSON/CSV)", "*.json *.csv"),
+                           ("JSON files", "*.json"), ("CSV files", "*.csv"),
+                           ("All files", "*.*")],
             )
             if not selected_path:
                 return
 
             try:
-                with open(selected_path, "r", encoding="utf-8-sig") as f:
-                    payload = json.load(f)
+                if selected_path.lower().endswith(".csv"):
+                    from shared.contestants_csv import read_contestants_csv
+                    payload = read_contestants_csv(selected_path)  # raises on bad CSV
+                else:
+                    with open(selected_path, "r", encoding="utf-8-sig") as f:
+                        payload = json.load(f)
                 if not isinstance(payload, (list, dict)):
                     raise ValueError("Unsupported data format.")
             except Exception as e:
@@ -1885,7 +1979,10 @@ class WeighingApp(tk.Tk):
             new_scanner_mode = scanner_mode_label_to_value.get(
                 scanner_mode_var.get(), "hotkey"
             )
-            scanner_camera_idx = int(persisted_settings.get("scanner_camera_index", 0))
+            # Fresh read: the "Kamera auswählen" dialog may have persisted a new
+            # scanner_camera_index after this settings window was opened, so the
+            # captured `persisted_settings` snapshot can be stale here.
+            scanner_camera_idx = int(load_settings().get("scanner_camera_index", 0))
             try:
                 save_settings({"scanner_mode": new_scanner_mode})
             except OSError as exc:
@@ -1984,10 +2081,58 @@ class WeighingApp(tk.Tk):
             self.ws_loop,
         )
 
+    def _refresh_camera_settings(self):
+        """Re-scan connected cameras and reconcile the persisted scanner camera.
+
+        The chosen camera is tracked by *name* (stable); its numeric index can
+        change across replug/reboot/OS reorder. On each call we:
+          - if a stored name still matches a connected camera, refresh the index
+            to that camera's current index (and switch a running scanner live);
+          - if no name is stored yet, adopt the name of the current index;
+          - if the stored camera is absent, leave the stored values untouched.
+        Returns the fresh camera list (possibly empty)."""
+        try:
+            cams = list_available_cameras()
+        except Exception:
+            logger.exception("Kamera-Enumeration fehlgeschlagen")
+            return []
+        if not cams:
+            return []
+
+        s = load_settings()
+        idx = int(s.get("scanner_camera_index", 0))
+        name = str(s.get("scanner_camera_name") or "").strip()
+
+        new_idx, new_name = idx, name
+        if name:
+            match = next((i for i, n in cams if n == name), None)
+            if match is not None:
+                new_idx = match          # same camera, possibly new index
+            # else: chosen camera not connected -> keep stored values as-is
+        else:
+            cur = next((n for i, n in cams if i == idx), None)
+            if cur:
+                new_name = cur           # first run: remember the name too
+
+        if new_idx != idx or new_name != name:
+            try:
+                save_settings({
+                    "scanner_camera_index": int(new_idx),
+                    "scanner_camera_name": new_name,
+                })
+            except OSError as exc:
+                logger.warning("Kamera-Settings konnten nicht gespeichert werden: %s", exc)
+            if new_idx != idx:
+                logger.info(
+                    "Scanner-Kamera '%s' an neuen Index %s gebunden (war %s)",
+                    new_name, new_idx, idx,
+                )
+                self._send_set_camera("scanner", new_idx)
+        return cams
+
     def open_camera_target_dialog(self):
         """Vereinheitlichter Picker: zwei Comboboxen (Waage, Pass-Scanner)
         + 'Anwenden' sendet SET_CAMERA an die jeweiligen Subprozesse."""
-        from shared.list_available_cameras import list_available_cameras
         cameras = list_available_cameras()
         if not cameras:
             messagebox.showwarning(
@@ -2031,10 +2176,23 @@ class WeighingApp(tk.Tk):
             frame, text="Pass-Scanner:", bg=THEME["bg"], fg=THEME["fg"], font=("Rubik", 11)
         ).grid(row=next_row, column=0, sticky="w", pady=6)
         scanner_combo = ttk.Combobox(frame, values=cam_labels, state="readonly", width=32)
-        # Wenn die Waage aktiv ist, schlagen wir die zweite Kamera vor (vermeidet
-        # Default-Konflikt mit der Waage). Sonst kann der Scanner direkt die
-        # erste / einzige nehmen.
-        scanner_combo.current(min(1, len(cameras) - 1) if weight_enabled else 0)
+        # Die aktuell aktive Kamera vorauswählen, damit "Ändern" vom Ist-Zustand
+        # ausgeht. Bevorzugt per Name (stabil), dann per Index; Fallback: zweite
+        # Kamera bei aktiver Waage (vermeidet Konflikt), sonst die erste.
+        _s = load_settings()
+        persisted_name = str(_s.get("scanner_camera_name") or "").strip()
+        persisted_scanner_idx = int(_s.get("scanner_camera_index", 0))
+        scanner_pos = None
+        if persisted_name:
+            scanner_pos = next(
+                (pos for pos, (_i, n) in enumerate(cameras) if n == persisted_name), None
+            )
+        if scanner_pos is None:
+            scanner_pos = next(
+                (pos for pos, (i, _n) in enumerate(cameras) if i == persisted_scanner_idx),
+                min(1, len(cameras) - 1) if weight_enabled else 0,
+            )
+        scanner_combo.current(scanner_pos)
         scanner_combo.grid(row=next_row, column=1, padx=(10, 0), pady=6)
         next_row += 1
 
@@ -2045,8 +2203,21 @@ class WeighingApp(tk.Tk):
             if weight_combo is not None:
                 weight_idx = cameras[weight_combo.current()][0]
                 self._send_set_camera("weight", weight_idx)
-            scanner_idx = cameras[scanner_combo.current()][0]
+            scanner_idx, scanner_name = cameras[scanner_combo.current()]
             self._send_set_camera("scanner", scanner_idx)
+            # Persist index AND name so the choice survives a respawn/restart and
+            # can be re-resolved after an index shuffle (see
+            # _refresh_camera_settings). SET_CAMERA above only switches the
+            # *running* subprocess.
+            try:
+                save_settings({
+                    "scanner_camera_index": int(scanner_idx),
+                    "scanner_camera_name": str(scanner_name),
+                })
+            except OSError as exc:
+                logger.warning(
+                    "Kamera-Auswahl konnte nicht gespeichert werden: %s", exc
+                )
             popup.destroy()
 
         tk.Button(
@@ -2135,7 +2306,7 @@ class WeighingApp(tk.Tk):
             self.ws_clients.discard(client)
 
     def start_websocket_server(self):
-        """Starts the GUI WebSocket server on ws://localhost:8766."""
+        """Starts the GUI WebSocket server on ws://WS_HOST:WS_PORT (see settings.json)."""
         if websockets is None:
             messagebox.showwarning(
                 "WebSocket",
@@ -2366,10 +2537,17 @@ class WeighingApp(tk.Tk):
             )
 
     def apply_received_scanner_frame(self, data_b64: str):
-        """Frame vom real_scanner-Subprocess -> rechtes Kamera-Label."""
+        """Frame vom real_scanner-Subprocess -> rechtes Kamera-Label und, falls
+        offen, die Vorschau im 'Neuer Teilnehmer'-Dialog (gleiche Bilddaten)."""
         if hasattr(self, "scanner_camera_label"):
             self._render_frame_to_label(
                 data_b64, self.scanner_camera_label, "_scanner_camera_photo"
+            )
+        cam = getattr(self, "add_participant_camera_label", None)
+        popup = self.add_participant_popup
+        if cam is not None and popup is not None and popup.winfo_exists():
+            self._render_frame_to_label(
+                data_b64, cam, "_add_participant_camera_photo"
             )
 
     def get_selected_full_name(self) -> str:
@@ -2633,6 +2811,21 @@ class WeighingApp(tk.Tk):
         """Beendet einen GUI-gespawnten weight-Subprozess (idempotent)."""
         self._stop_managed_subprocess("weight_subprocess")
 
+    def _maybe_spawn_scanner_on_startup(self):
+        """Standalone-launch only: start the scanner subprocess for the persisted
+        mode. Under the launcher (main.py) the scanner runs as a sibling process
+        — WEIGHIN_LAUNCHED_BY_LAUNCHER marks that case so the GUI does not spawn
+        a second one. No-op for mode 'off' or if a scanner is already running
+        (e.g. one started later via the settings dialog)."""
+        if os.environ.get("WEIGHIN_LAUNCHED_BY_LAUNCHER") == "1":
+            return
+        if getattr(self, "scanner_mode", "off") == "off":
+            return
+        if self.scanner_subprocess is not None and self.scanner_subprocess.poll() is None:
+            return
+        camera_index = int(load_settings().get("scanner_camera_index", 0))
+        self.start_scanner_subprocess(self.scanner_mode, camera_index)
+
     def start_scanner_subprocess(self, mode: str, camera_index: int) -> bool:
         """Spawnt real_scanner.py mit dem gegebenen Modus (Runtime-Switch).
 
@@ -2833,7 +3026,7 @@ class WeighingApp(tk.Tk):
         # Search Input
         self.search_placeholder = "Teilnehmer suchen"
         self.search_var = tk.StringVar()
-        self.search_var.trace("w", self.filter_list)
+        self.search_var.trace_add("write", self.filter_list)
         self.search_entry = tk.Entry(sidebar, textvariable=self.search_var, bg=THEME["input_bg"], 
                                      fg=THEME["input_fg"], insertbackground=THEME["fg"], font=("Rubik", 12))
         self.search_entry.pack(fill=tk.X, padx=10, pady=(18, 20), ipady=6)
@@ -3076,14 +3269,6 @@ class WeighingApp(tk.Tk):
             "width": 18,
         }
 
-        self.btn_qr_scan = tk.Button(
-            left_actions,
-            text="QR Scannen (F12)",
-            command=self.trigger_qr_scan_hotkey,
-            **btn_opts,
-        )
-        self.btn_qr_scan.pack(side=tk.LEFT, padx=5)
-
         double_start_btn_opts = dict(btn_opts)
         double_start_btn_opts.update(
             {
@@ -3093,14 +3278,6 @@ class WeighingApp(tk.Tk):
                 "activeforeground": "black",
             }
         )
-        self.btn_weight = tk.Button(
-            left_actions,
-            text="Gewicht nehmen",
-            command=self.read_scale,
-            **btn_opts,
-        )
-        self.btn_weight.pack(side=tk.LEFT, padx=5)
-
         self.btn_save = tk.Button(
             left_actions,
             text="Speichern",
@@ -3140,6 +3317,17 @@ class WeighingApp(tk.Tk):
             entry_widget.bind("<FocusOut>", self.update_save_button_state, add="+")
 
 if __name__ == "__main__":
+    # Single-instance guard. When launched via main.py the launcher already
+    # holds the lock (WEIGHIN_LAUNCHED_BY_LAUNCHER=1) — don't re-acquire, or the
+    # child GUI would block on the parent's lock.
+    if os.environ.get("WEIGHIN_LAUNCHED_BY_LAUNCHER") != "1":
+        from shared.single_instance import (
+            acquire_single_instance_lock,
+            warn_already_running,
+        )
+        if not acquire_single_instance_lock():
+            warn_already_running(gui=True)
+            sys.exit(1)
     app = WeighingApp()
     app.mainloop()
 

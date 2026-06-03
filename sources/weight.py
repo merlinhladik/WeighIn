@@ -11,10 +11,13 @@ import websockets
 from shared.wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
 from shared.list_available_cameras import list_available_cameras
 from shared.logging_config import configure_logging
+from shared.settings import ws_client_url
 
 logger = configure_logging("weight")
 
-URL = "ws://localhost:8766"
+# Connect target of the GUI WebSocket server; configurable via
+# ~/.weighin/settings.json (ws_host / ws_port).
+URL = ws_client_url()
 RECONNECT_DELAY_S = 2.0
 
 DECODE_W, DECODE_H = 80, 140

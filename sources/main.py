@@ -274,6 +274,15 @@ def _stop_process(process):
 
         
 def main():
+    # Single-instance guard: the launcher owns the lock for the whole session
+    # (it spawns gui/weight/scanner as children; the child GUI skips the lock
+    # via WEIGHIN_LAUNCHED_BY_LAUNCHER). A second launcher/GUI exits instead of
+    # fighting over the camera, scale and data file.
+    from shared.single_instance import acquire_single_instance_lock, warn_already_running
+    if not acquire_single_instance_lock():
+        warn_already_running(gui=False)
+        sys.exit(1)
+
     base = os.path.dirname(sys.executable)
 
     # Persistierte User-Settings (~/.weighin/settings.json) sind autoritativ
@@ -286,7 +295,12 @@ def main():
     scanner_mode = str(settings.get("scanner_mode", "hotkey"))
     scanner_camera_index = int(settings.get("scanner_camera_index", 1))
 
-    gui = _start_process(base, "gui", requires_root=False)
+    # Mark the launcher path so the GUI does not also spawn the scanner at
+    # startup (it runs as a sibling here) — see gui._maybe_spawn_scanner_on_startup.
+    gui = _start_process(
+        base, "gui", requires_root=False,
+        extra_env={"WEIGHIN_LAUNCHED_BY_LAUNCHER": "1"},
+    )
 
     weight = _start_process(base, "weight") if weight_scan_enabled else None
 

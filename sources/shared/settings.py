@@ -22,6 +22,11 @@ Currently exposed keys:
   ``"camera"``-Mode wirksam. Default ``0`` weil das auf jedem cam-fähigen
   Mac existiert (interne Camera); Multi-Cam-Setups setzen den Index
   manuell über den ``Kamera auswählen``-Dialog.
+- ``ws_host`` (str, default ``"localhost"``) / ``ws_port`` (int, default
+  ``8766``) — Bind-Adresse des GUI-WebSocket-Servers. Konfigurierbar, um
+  Port-Kollisionen auszuweichen. Die drei Prozesse (GUI-Server,
+  ``weight``- und ``scanner``-Client) lesen das unabhängig über
+  ``ws_server_address()`` bzw. ``ws_client_url()``.
 
 Design notes:
 
@@ -46,6 +51,12 @@ DEFAULTS: Dict[str, Any] = {
     "weight_scan_enabled": True,
     "scanner_mode": "hotkey",  # "off" | "hotkey" | "camera"
     "scanner_camera_index": 0,
+    # Stable identifier of the chosen scanner camera. The numeric index can
+    # shuffle across replug/reboot/OS reorder; the name lets us re-resolve the
+    # correct index on each settings open. Empty = not chosen yet.
+    "scanner_camera_name": "",
+    "ws_host": "localhost",
+    "ws_port": 8766,
 }
 
 
@@ -98,3 +109,23 @@ def save_settings(updates: Dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def ws_server_address() -> tuple:
+    """Return ``(host, port)`` for the GUI WebSocket server bind."""
+    s = load_settings()
+    return s["ws_host"], int(s["ws_port"])
+
+
+def ws_client_url() -> str:
+    """Return the ``ws://host:port`` URL the weight/scanner clients connect to.
+
+    A wildcard or empty bind host (``0.0.0.0`` / ``::``) is meaningful only for
+    the server's ``serve`` call; the loopback clients must dial a concrete host,
+    so it is mapped to ``localhost``.
+    """
+    s = load_settings()
+    host = s["ws_host"]
+    if host in ("", "0.0.0.0", "::"):
+        host = "localhost"
+    return f"ws://{host}:{int(s['ws_port'])}"

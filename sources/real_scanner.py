@@ -15,6 +15,7 @@ from shared.logging_config import configure_logging
 import keyboard
 import websockets
 from shared.list_available_cameras import list_available_cameras
+from shared.settings import ws_client_url
 
 try:
     import cv2
@@ -23,7 +24,9 @@ except Exception:
 
 logger = configure_logging("real_scanner")
 
-URL = "ws://localhost:8766"
+# Connect target of the GUI WebSocket server; configurable via
+# ~/.weighin/settings.json (ws_host / ws_port).
+URL = ws_client_url()
 COOLDOWN_S = 1.0
 HOTKEY_DEBOUNCE_S = 0.35
 SCAN_HINT = "Bitte den QR scannen und hier nichts eintippen"
@@ -41,6 +44,17 @@ SCANNER_STREAM_FPS = 12.0
 SCANNER_STREAM_INTERVAL_S = 1.0 / SCANNER_STREAM_FPS
 SCANNER_FRAME_TARGET_WIDTH = 480
 SCANNER_FRAME_JPEG_QUALITY = 70
+
+# Capture resolution we request from the camera. Wide-angle externals (e.g.
+# Logitech Brio) render the held pass small; full HD gives the QR enough pixels.
+SCANNER_CAPTURE_WIDTH = 1920
+SCANNER_CAPTURE_HEIGHT = 1080
+# Center-ROI fallback for QR detection: when the full frame yields nothing, the
+# pass is usually small and centred (wide FOV) — re-detect on an upscaled centre
+# crop so a fixed-focus camera can decode it from a comfortable (in-focus)
+# distance. ROI = central fraction of the frame, then upscaled.
+SCANNER_ROI_FRACTION = 0.55
+SCANNER_ROI_UPSCALE = 2.0
 
 
 def base64url_decode(data: str) -> bytes:
@@ -91,8 +105,24 @@ class ScanPopup:
         self._last_hotkey_ts = 0.0
         self._camera_window_name = "QR Kamera Live"
 
-        self._hotkey_handle = keyboard.add_hotkey("F12", self._on_hotkey_press)
-        self._esc_handle = keyboard.add_hotkey("esc", self._on_escape_press)
+        # Global keyboard hotkeys need root on macOS/Linux; without it the
+        # `keyboard` listener thread raises "Error 13 - Must be run as
+        # administrator" and dumps a traceback. Register only when privileged —
+        # the GUI keeps its own in-app Tkinter F12 either way.
+        self._hotkey_handle = None
+        self._esc_handle = None
+        if self._can_use_global_hotkeys():
+            try:
+                self._hotkey_handle = keyboard.add_hotkey("F12", self._on_hotkey_press)
+                self._esc_handle = keyboard.add_hotkey("esc", self._on_escape_press)
+            except Exception:
+                logger.warning("Globale Hotkeys konnten nicht registriert werden", exc_info=True)
+        else:
+            logger.warning(
+                "Globale Tastatur-Hotkeys (F12/Esc) deaktiviert — benötigen Root "
+                "auf macOS/Linux. Ohne sudo läuft der Scanner ohne globalen Hotkey "
+                "(die GUI-interne F12-Taste funktioniert weiterhin)."
+            )
 
     def _get_mode(self) -> str:
         with self._state_lock:
@@ -729,10 +759,22 @@ class ScanPopup:
             self._start_live_camera_scan(camera_index, return_to_popup=True)
             return None
 
+    @staticmethod
+    def _can_use_global_hotkeys() -> bool:
+        """The `keyboard` lib needs root on macOS/Linux (else Error 13 in its
+        listener thread). Windows works without elevation."""
+        if os.name == "nt":
+            return True
+        try:
+            return os.geteuid() == 0
+        except AttributeError:
+            return False
+
     def close(self):
         if self._hotkey_handle is not None:
             keyboard.remove_hotkey(self._hotkey_handle)
-        keyboard.remove_hotkey(self._esc_handle)
+        if self._esc_handle is not None:
+            keyboard.remove_hotkey(self._esc_handle)
         self._stop_camera_scan()
         if self.win and self.win.winfo_exists():
             self.win.destroy()
@@ -825,6 +867,62 @@ async def main():
         await ws.close()
 
 
+def _request_capture_resolution(cap):
+    """Best-effort: ask the camera for full HD. Unsupported values are ignored
+    by the backend, so this is safe for any camera."""
+    try:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, SCANNER_CAPTURE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SCANNER_CAPTURE_HEIGHT)
+    except Exception:
+        pass
+
+
+def _build_detectors():
+    """QR detectors to try in order. The ArUco-based detector (OpenCV ≥4.7) is
+    often more tolerant of small/angled codes than the classic one; both decode
+    standard QR. Classic first (fastest), ArUco as fallback."""
+    dets = [cv2.QRCodeDetector()]
+    try:
+        dets.append(cv2.QRCodeDetectorAruco())
+    except Exception:
+        pass
+    return dets
+
+
+def _try_decode(detector, img):
+    try:
+        text, points, _ = detector.detectAndDecode(img)
+    except Exception:
+        return "", None
+    return text, points
+
+
+def _detect_qr(detectors, frame):
+    """Detect+decode a QR. Tries each detector on the full frame and on an
+    upscaled centre crop. Wide-angle / fixed-focus cameras (e.g. Brio) render a
+    held pass small and central — the centre-ROI retry gives the detector more
+    pixels on the code. Returns (text, points)."""
+    h, w = frame.shape[:2]
+    cw, ch = int(w * SCANNER_ROI_FRACTION), int(h * SCANNER_ROI_FRACTION)
+    roi = None
+    if cw >= 8 and ch >= 8:
+        x0, y0 = (w - cw) // 2, (h - ch) // 2
+        roi = frame[y0:y0 + ch, x0:x0 + cw]
+        if SCANNER_ROI_UPSCALE != 1.0:
+            roi = cv2.resize(
+                roi, (int(cw * SCANNER_ROI_UPSCALE), int(ch * SCANNER_ROI_UPSCALE)),
+                interpolation=cv2.INTER_CUBIC,
+            )
+    for det in detectors:
+        for img in (frame, roi):
+            if img is None:
+                continue
+            text, points = _try_decode(det, img)
+            if points is not None and text:
+                return text, points
+    return "", None
+
+
 async def _streaming_main(scanner_cam_index: int):
     """
     Dialog-freier Streaming-Modus: oeffnet die Kamera einmal, streamt Frames
@@ -855,8 +953,9 @@ async def _streaming_main(scanner_cam_index: int):
         )
         return
     logger.info("Scanner-Kamera index=%s geoeffnet (Streaming-Modus)", scanner_cam_index)
+    _request_capture_resolution(cap)
 
-    detector = cv2.QRCodeDetector()
+    detectors = _build_detectors()
     ws = WebSocketClient(URL)
     qr_client = QRClient(ws)
     last_emit_ts = 0.0
@@ -908,11 +1007,8 @@ async def _streaming_main(scanner_cam_index: int):
                         await connect_with_retry()
                         await qr_client.register()
 
-            # QR-Detection auf Originalframe
-            try:
-                text, points, _ = detector.detectAndDecode(frame)
-            except Exception:
-                text, points = "", None
+            # QR-Detection: mehrere Detektoren, Vollbild + Center-ROI-Fallback
+            text, points = _detect_qr(detectors, frame)
 
             if points is not None and text:
                 trimmed = ScanPopup._trim_camera_qr_text(text).strip()
@@ -953,6 +1049,7 @@ async def _streaming_main(scanner_cam_index: int):
                         if new_cap.isOpened():
                             cap = new_cap
                             scanner_cam_index = target_idx
+                            _request_capture_resolution(cap)
                         else:
                             new_cap.release()
                             logger.warning(
