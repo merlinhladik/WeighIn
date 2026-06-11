@@ -10,6 +10,7 @@ import asyncio
 import websockets
 from shared.wsclient import WebSocketClient, WeightClient, WebSocketDisconnected
 from shared.list_available_cameras import list_available_cameras
+from shared.camera_backend import open_capture
 from shared.logging_config import configure_logging
 from shared.settings import ws_client_url
 
@@ -35,7 +36,7 @@ def _try_open_camera(camera_index: int):
     Versucht Kamera zu oeffnen. Liefert cv2.VideoCapture oder None.
     Setzt zusaetzlich Belichtungsparameter, sofern AVFoundation/Treiber sie akzeptieren.
     """
-    cap = cv2.VideoCapture(camera_index)
+    cap = open_capture(camera_index)
     if not cap.isOpened():
         cap.release()
         return None

@@ -15,6 +15,7 @@ from shared.logging_config import configure_logging
 import keyboard
 import websockets
 from shared.list_available_cameras import list_available_cameras
+from shared.camera_backend import open_capture
 from shared.settings import ws_client_url
 
 try:
@@ -347,7 +348,7 @@ class ScanPopup:
             return False
 
         checking_popup = self._show_camera_probe_dialog()
-        cap = cv2.VideoCapture(camera_index)
+        cap = open_capture(camera_index)
         if not cap.isOpened():
             logger.warning("Camera index %s is not opened during probe", camera_index)
             cap.release()
@@ -410,7 +411,7 @@ class ScanPopup:
             self._camera_cap = None
 
         if self._camera_cap is None:
-            cap = cv2.VideoCapture(camera_index)
+            cap = open_capture(camera_index)
             if not cap.isOpened():
                 logger.warning("Failed to open camera index %s", camera_index)
                 cap.release()
@@ -923,6 +924,23 @@ def _detect_qr(detectors, frame):
     return "", None
 
 
+def _camera_candidates(start_index: int, max_search: int = 6):
+    """Reihenfolge, in der Kamera-Indizes durchprobiert werden.
+
+    Erst die konfigurierte Kamera, dann jede andere enumerierte (per pygrabber),
+    danach 0..max_search-1 als Auffangnetz. So weicht der Scanner automatisch auf
+    eine funktionierende Kamera aus, wenn der gespeicherte Index belegt oder
+    abgezogen ist (analog zu weight._open_first_working_camera).
+    """
+    listed = [idx for idx, _ in list_available_cameras()]
+    candidates = []
+    if start_index in listed:
+        candidates.append(start_index)
+    candidates.extend(idx for idx in listed if idx != start_index)
+    candidates.extend(idx for idx in range(max_search) if idx not in candidates)
+    return candidates
+
+
 async def _streaming_main(scanner_cam_index: int):
     """
     Dialog-freier Streaming-Modus: oeffnet die Kamera einmal, streamt Frames
@@ -933,23 +951,34 @@ async def _streaming_main(scanner_cam_index: int):
         logger.error("cv2 nicht verfuegbar - Streaming-Modus unmoeglich")
         return
 
-    # macOS-TCC-Race: erster Open kann False liefern bis die Permission durch ist.
+    # Erst die konfigurierte Kamera, dann Fallback auf jede andere verfuegbare
+    # (belegter/abgezogener Index). macOS-TCC-Race: erster Open kann False
+    # liefern bis die Permission durch ist -> mehrere Runden ueber alle Kandidaten.
     cap = None
+    candidates = _camera_candidates(scanner_cam_index)
     for attempt in range(6):
-        cap = cv2.VideoCapture(scanner_cam_index)
-        if cap.isOpened():
+        for idx in candidates:
+            cap = open_capture(idx)
+            if cap.isOpened():
+                if idx != scanner_cam_index:
+                    logger.warning(
+                        "Scanner-Kamera index=%s nicht nutzbar - Fallback auf index=%s",
+                        scanner_cam_index, idx,
+                    )
+                scanner_cam_index = idx
+                break
+            cap.release()
+            cap = None
+        if cap is not None:
             break
-        cap.release()
-        cap = None
         logger.warning(
-            "Scanner-Kamera index=%s noch nicht offen (attempt %s/6) - TCC retry in 1.5s",
-            scanner_cam_index, attempt + 1,
+            "Keine Scanner-Kamera offen (attempt %s/6, Kandidaten=%s) - TCC retry in 1.5s",
+            attempt + 1, candidates,
         )
         await asyncio.sleep(1.5)
     if cap is None:
         logger.error(
-            "Scanner-Kamera index=%s konnte nach Retries nicht geoeffnet werden",
-            scanner_cam_index,
+            "Keine Scanner-Kamera oeffenbar (Kandidaten=%s)", candidates,
         )
         return
     logger.info("Scanner-Kamera index=%s geoeffnet (Streaming-Modus)", scanner_cam_index)
@@ -1045,7 +1074,7 @@ async def _streaming_main(scanner_cam_index: int):
                     if isinstance(target_idx, int):
                         logger.info("SET_CAMERA -> index=%s", target_idx)
                         cap.release()
-                        new_cap = cv2.VideoCapture(target_idx)
+                        new_cap = open_capture(target_idx)
                         if new_cap.isOpened():
                             cap = new_cap
                             scanner_cam_index = target_idx
@@ -1056,7 +1085,7 @@ async def _streaming_main(scanner_cam_index: int):
                                 "SET_CAMERA failed for index %s, restoring previous %s",
                                 target_idx, scanner_cam_index,
                             )
-                            cap = cv2.VideoCapture(scanner_cam_index)
+                            cap = open_capture(scanner_cam_index)
 
             await asyncio.sleep(0.005)
     finally:

@@ -1108,22 +1108,52 @@ class WeighingApp(tk.Tk):
             else:
                 self.double_start_status_label.grid_remove()
 
+    def _finalize_popup_size(self, popup, min_w, min_h, center=True):
+        """Sizes a Toplevel to fit its actual content, then optionally centers it.
+
+        Feste Fenstergrößen (popup.geometry("BxH")) waren auf macOS abgestimmt.
+        Windows rendert dieselben Widgets höher (anderer Fallback-Font, da
+        "Rubik" oft fehlt, + größeres Tk-/ttk-Padding), wodurch Buttons am
+        unteren Rand unter den Fensterrand rutschten und unsichtbar/unklickbar
+        wurden. Hier wird die Höhe an den tatsächlichen Inhalt angepasst —
+        mindestens die ursprüngliche Größe, damit das beabsichtigte macOS-Layout
+        (z. B. großzügige Abstände) erhalten bleibt — und auf die Bildschirmhöhe
+        begrenzt. Muss aufgerufen werden, NACHDEM alle Widgets gepackt sind.
+        """
+        popup.update_idletasks()
+        win_w = max(min_w, popup.winfo_reqwidth())
+        win_h = max(min_h, popup.winfo_reqheight())
+        try:
+            screen_h = popup.winfo_screenheight()
+        except Exception:
+            screen_h = win_h
+        # Auf Bildschirmhöhe begrenzen; falls geklemmt, Höhe vergrößerbar lassen,
+        # damit die Buttons notfalls per Resize erreichbar bleiben.
+        if win_h > screen_h - 80:
+            win_h = screen_h - 80
+            popup.resizable(False, True)
+        else:
+            popup.resizable(False, False)
+        x_pos = y_pos = 0
+        if center:
+            try:
+                self.update_idletasks()
+                x_pos = self.winfo_rootx() + (self.winfo_width() - win_w) // 2
+                y_pos = self.winfo_rooty() + (self.winfo_height() - win_h) // 2
+            except Exception:
+                try:
+                    x_pos = (popup.winfo_screenwidth() - win_w) // 2
+                    y_pos = (screen_h - win_h) // 2
+                except Exception:
+                    x_pos = y_pos = 0
+        popup.geometry(f"{win_w}x{win_h}+{max(x_pos, 0)}+{max(y_pos, 0)}")
+
     def open_double_start_window(self):
         """Opens a small dialog to choose the double-start mode."""
         popup = tk.Toplevel(self)
         popup.title("Doppelstart")
-        popup.geometry("320x210")
         popup.configure(bg=THEME["bg"])
-        popup.resizable(False, False)
         popup.transient(self)
-        popup.update_idletasks()
-        try:
-            self.update_idletasks()
-            x_pos = self.winfo_rootx() + (self.winfo_width() - 320) // 2
-            y_pos = self.winfo_rooty() + (self.winfo_height() - 210) // 2
-            popup.geometry(f"320x210+{max(x_pos, 0)}+{max(y_pos, 0)}")
-        except Exception:
-            pass
         popup.grab_set()
 
         tk.Label(
@@ -1183,6 +1213,8 @@ class WeighingApp(tk.Tk):
             font=("Rubik", 10, "bold"),
             width=12,
         ).pack(side=tk.LEFT, padx=6)
+
+        self._finalize_popup_size(popup, 320, 210)
 
     @staticmethod
     def get_age_class(age_years: int) -> str:
@@ -1466,9 +1498,9 @@ class WeighingApp(tk.Tk):
 
         popup = tk.Toplevel(self)
         popup.title("Neuen Teilnehmer hinzufügen")
-        popup.geometry("460x760")
         popup.configure(bg=THEME["bg"])
         self.add_participant_popup = popup
+        # Endgültige Größe/Position am Ende, nachdem alle Widgets gegridet sind.
 
         popup.columnconfigure(1, weight=1)
 
@@ -1689,6 +1721,8 @@ class WeighingApp(tk.Tk):
 
         popup.protocol("WM_DELETE_WINDOW", _on_popup_close)
 
+        self._finalize_popup_size(popup, 460, 760)
+
     def save_new_participant(self, popup, e_first, e_last, e_club, e_birthyear, gender_var, valid_var, paid_var):
         """Validates and stores a new participant."""
         first = e_first.get().strip()
@@ -1765,33 +1799,14 @@ class WeighingApp(tk.Tk):
         self._refresh_camera_settings()
 
         popup_w = 520
-        popup_h = 460
         popup = tk.Toplevel(self)
         self.settings_popup = popup
         popup.title("Einstellungen")
-        popup.geometry(f"{popup_w}x{popup_h}")
         popup.configure(bg=THEME["bg"])
-        popup.resizable(False, False)
         if hasattr(popup, "transient"):
             popup.transient(self)
-
-        if hasattr(popup, "update_idletasks"):
-            popup.update_idletasks()
-        try:
-            if hasattr(self, "update_idletasks"):
-                self.update_idletasks()
-            root_x = self.winfo_rootx()
-            root_y = self.winfo_rooty()
-            root_w = self.winfo_width()
-            root_h = self.winfo_height()
-            x_pos = root_x + (root_w - popup_w) // 2
-            y_pos = root_y + (root_h - popup_h) // 2
-        except Exception:
-            screen_w = popup.winfo_screenwidth() if hasattr(popup, "winfo_screenwidth") else popup_w
-            screen_h = popup.winfo_screenheight() if hasattr(popup, "winfo_screenheight") else popup_h
-            x_pos = (screen_w - popup_w) // 2
-            y_pos = (screen_h - popup_h) // 2
-        popup.geometry(f"{popup_w}x{popup_h}+{max(x_pos, 0)}+{max(y_pos, 0)}")
+        # Endgültige Größe/Position wird am Ende der Funktion gesetzt, nachdem
+        # alle Widgets gepackt sind — siehe _finalize_popup_size().
 
         lbl_style = {"bg": THEME["bg"], "fg": THEME["fg"], "font": ("Rubik", 11)}
 
@@ -2070,6 +2085,8 @@ class WeighingApp(tk.Tk):
             width=12,
         ).pack(side=tk.LEFT, padx=8)
         popup.protocol("WM_DELETE_WINDOW", _on_settings_close)
+
+        self._finalize_popup_size(popup, popup_w, 460)
 
     def send_scanner_popup_request(self):
         """Asks scanner client to open QR scan popup."""
@@ -2572,31 +2589,17 @@ class WeighingApp(tk.Tk):
         popup_h = 300
 
         def center_weight_popup(popup_window):
-            popup_window.update_idletasks()
-            try:
-                self.update_idletasks()
-                root_x = self.winfo_rootx()
-                root_y = self.winfo_rooty()
-                root_w = self.winfo_width()
-                root_h = self.winfo_height()
-                x_pos = root_x + (root_w - popup_w) // 2
-                y_pos = root_y + (root_h - popup_h) // 2
-            except Exception:
-                screen_w = popup_window.winfo_screenwidth()
-                screen_h = popup_window.winfo_screenheight()
-                x_pos = (screen_w - popup_w) // 2
-                y_pos = (screen_h - popup_h) // 2
-            popup_window.geometry(f"{popup_w}x{popup_h}+{max(x_pos, 0)}+{max(y_pos, 0)}")
+            # Mindestgröße 520x300 (großzügig zentriertes Gewicht via expand),
+            # wächst aber, falls der 64pt-Text + Buttons auf Windows mehr Höhe
+            # brauchen — sonst würden die OK/Cancel-Buttons abgeschnitten.
+            self._finalize_popup_size(popup_window, popup_w, popup_h)
 
         if self.weight_popup is None or not self.weight_popup.winfo_exists():
             popup = tk.Toplevel(self)
             popup.title("Waage")
-            popup.geometry(f"{popup_w}x{popup_h}")
             popup.configure(bg=THEME["bg"])
-            popup.resizable(False, False)
             popup.transient(self)
             popup.protocol("WM_DELETE_WINDOW", lambda: None)
-            center_weight_popup(popup)
 
             name_label = tk.Label(
                 popup,
@@ -2647,6 +2650,8 @@ class WeighingApp(tk.Tk):
                 font=("Rubik", 10, "bold"),
                 width=10,
             ).pack(side=tk.LEFT, padx=8)
+
+            center_weight_popup(popup)
 
             self.weight_popup = popup
             self.weight_popup_name_label = name_label
